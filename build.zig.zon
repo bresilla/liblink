@@ -1,6 +1,16 @@
 .{
     .name = .syslink,
     .version = "0.0.1",
+    .dependencies = .{
+        .zquic = .{
+            .url = "https://github.com/GhostKellz/zquic/archive/f7bb038014021bd3db9fa7924ac36ad011fe53e7.tar.gz",
+            .hash = "zquic-0.9.5-2rPds65bEgD9fM_aYNEgs4Rt84jaFb_eG_vqmJiTC362",
+        },
+        .zcrypto = .{
+            .url = "https://github.com/GhostKellz/zcrypto/archive/5661294270ca14cafbfd3482795e1efe1de044fc.tar.gz",
+            .hash = "zcrypto-0.9.7-rgQAI8_qDgBqWr7_jwJX8-rGLDVYIqN5SnYVl-DW76Qq",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -8,5 +18,5 @@
         "examples",
         "src",
     },
-    .fingerprint = 0x3cf863a045e37b7c,
+    .fingerprint = 0xc55b9533dacbf6c7,
 }
