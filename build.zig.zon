@@ -1,0 +1,12 @@
+.{
+    .name = .syslink,
+    .version = "0.0.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "cli",
+        "examples",
+        "src",
+    },
+    .fingerprint = 0x3cf863a045e37b7c,
+}
