@@ -558,3 +558,98 @@ test "encryptEnvelope - large payload" {
 
     try testing.expectEqualSlices(u8, plaintext, decrypted);
 }
+
+test "obfuscation - deterministic test vector" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Use fixed seed for deterministic test
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+
+    const keyword = "test-vector-keyword";
+    const plaintext = "SSH-QUIC test message";
+
+    // Encrypt
+    var envelope = try encryptEnvelope(allocator, keyword, plaintext, random);
+    defer envelope.deinit(allocator);
+
+    // Verify nonce high bit is set
+    try testing.expect((envelope.nonce[0] & high_bit_marker) != 0);
+
+    // Serialize to wire format
+    const wire_size = obfs_nonce_size + envelope.payload.len + obfs_tag_size;
+    const wire_data = try allocator.alloc(u8, wire_size);
+    defer allocator.free(wire_data);
+    serializeEnvelope(&envelope, wire_data);
+
+    // Deserialize from wire format
+    var envelope2 = try deserializeEnvelope(allocator, wire_data);
+    defer envelope2.deinit(allocator);
+
+    // Decrypt
+    const decrypted = try decryptEnvelope(allocator, keyword, &envelope2);
+    defer allocator.free(decrypted);
+
+    // Verify round-trip
+    try testing.expectEqualStrings(plaintext, decrypted);
+
+    // Verify envelope structure
+    try testing.expectEqual(@as(usize, obfs_nonce_size), envelope.nonce.len);
+    try testing.expectEqual(@as(usize, obfs_tag_size), envelope.tag.len);
+    try testing.expectEqual(plaintext.len, envelope.payload.len);
+}
+
+test "obfuscation - empty plaintext" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+
+    const plaintext = "";
+
+    var envelope = try encryptEnvelope(allocator, "empty-test", plaintext, random);
+    defer envelope.deinit(allocator);
+
+    // Verify payload is empty
+    try testing.expectEqual(@as(usize, 0), envelope.payload.len);
+
+    const decrypted = try decryptEnvelope(allocator, "empty-test", &envelope);
+    defer allocator.free(decrypted);
+
+    try testing.expectEqualStrings(plaintext, decrypted);
+}
+
+test "obfuscation - multiple encryptions with same keyword produce different ciphertexts" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const keyword = "same-keyword";
+    const plaintext = "Same plaintext";
+
+    var prng1 = std.Random.DefaultPrng.init(1111);
+    var prng2 = std.Random.DefaultPrng.init(2222);
+
+    var envelope1 = try encryptEnvelope(allocator, keyword, plaintext, prng1.random());
+    defer envelope1.deinit(allocator);
+
+    var envelope2 = try encryptEnvelope(allocator, keyword, plaintext, prng2.random());
+    defer envelope2.deinit(allocator);
+
+    // Nonces should be different (different random seeds)
+    try testing.expect(!std.mem.eql(u8, &envelope1.nonce, &envelope2.nonce));
+
+    // Ciphertexts should be different (different nonces)
+    try testing.expect(!std.mem.eql(u8, envelope1.payload, envelope2.payload));
+
+    // But both should decrypt to same plaintext
+    const decrypted1 = try decryptEnvelope(allocator, keyword, &envelope1);
+    defer allocator.free(decrypted1);
+
+    const decrypted2 = try decryptEnvelope(allocator, keyword, &envelope2);
+    defer allocator.free(decrypted2);
+
+    try testing.expectEqualStrings(plaintext, decrypted1);
+    try testing.expectEqualStrings(plaintext, decrypted2);
+}
