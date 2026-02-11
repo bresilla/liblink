@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .zquic = .{
-            .url = "https://github.com/GhostKellz/zquic/archive/f7bb038014021bd3db9fa7924ac36ad011fe53e7.tar.gz",
-            .hash = "zquic-0.9.5-2rPds65bEgD9fM_aYNEgs4Rt84jaFb_eG_vqmJiTC362",
+            .url = "https://github.com/bresilla/zquic/archive/497497f59a7a1245d3056a95f0204bc90c6e9b7b.tar.gz",
+            .hash = "1220f9389bfcba6185e2c6b15614e273230a33f311cfb4c5521e1eb79899483f8eba",
         },
         .zcrypto = .{
             .url = "https://github.com/GhostKellz/zcrypto/archive/5661294270ca14cafbfd3482795e1efe1de044fc.tar.gz",
