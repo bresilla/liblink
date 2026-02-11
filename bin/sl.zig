@@ -32,16 +32,16 @@ pub fn main() !void {
 }
 
 fn printVersion() !void {
-    std.debug.print("vb version {s}\n", .{VERSION});
+    std.debug.print("sl version {s}\n", .{VERSION});
     std.debug.print("SSH/QUIC implementation with SFTP support\n", .{});
 }
 
 fn printHelp() !void {
     std.debug.print(
-        \\vb - SSH/QUIC CLI tool
+        \\sl - SSH/QUIC CLI tool
         \\
         \\USAGE:
-        \\    vb <command> [options]
+        \\    sl <command> [options]
         \\
         \\COMMANDS:
         \\    sftp <subcommand>     SFTP file operations
@@ -63,10 +63,10 @@ fn printHelp() !void {
         \\    -v, --version         Show version
         \\
         \\EXAMPLES:
-        \\    vb sftp get /remote/file.txt ./local.txt
-        \\    vb sftp put ./local.txt /remote/file.txt
-        \\    vb sftp ls /remote/directory
-        \\    vb sftp mkdir /remote/newdir
+        \\    sl sftp get /remote/file.txt ./local.txt
+        \\    sl sftp put ./local.txt /remote/file.txt
+        \\    sl sftp ls /remote/directory
+        \\    sl sftp mkdir /remote/newdir
         \\
     , .{});
 }
@@ -110,7 +110,7 @@ fn sftpGet(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 2) {
         std.debug.print("Error: 'get' requires remote and local paths\n", .{});
-        std.debug.print("Usage: vb sftp get <remote> <local>\n", .{});
+        std.debug.print("Usage: sl sftpget <remote> <local>\n", .{});
         std.process.exit(1);
     }
 
@@ -124,7 +124,7 @@ fn sftpPut(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 2) {
         std.debug.print("Error: 'put' requires local and remote paths\n", .{});
-        std.debug.print("Usage: vb sftp put <local> <remote>\n", .{});
+        std.debug.print("Usage: sl sftpput <local> <remote>\n", .{});
         std.process.exit(1);
     }
 
@@ -145,7 +145,7 @@ fn sftpMkdir(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 1) {
         std.debug.print("Error: 'mkdir' requires a path\n", .{});
-        std.debug.print("Usage: vb sftp mkdir <path>\n", .{});
+        std.debug.print("Usage: sl sftpmkdir <path>\n", .{});
         std.process.exit(1);
     }
 
@@ -157,7 +157,7 @@ fn sftpRmdir(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 1) {
         std.debug.print("Error: 'rmdir' requires a path\n", .{});
-        std.debug.print("Usage: vb sftp rmdir <path>\n", .{});
+        std.debug.print("Usage: sl sftprmdir <path>\n", .{});
         std.process.exit(1);
     }
 
@@ -169,7 +169,7 @@ fn sftpRm(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 1) {
         std.debug.print("Error: 'rm' requires a path\n", .{});
-        std.debug.print("Usage: vb sftp rm <path>\n", .{});
+        std.debug.print("Usage: sl sftprm <path>\n", .{});
         std.process.exit(1);
     }
 
@@ -181,7 +181,7 @@ fn sftpMv(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 2) {
         std.debug.print("Error: 'mv' requires old and new paths\n", .{});
-        std.debug.print("Usage: vb sftp mv <old> <new>\n", .{});
+        std.debug.print("Usage: sl sftpmv <old> <new>\n", .{});
         std.process.exit(1);
     }
 
@@ -195,7 +195,7 @@ fn sftpStat(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator;
     if (args.len < 1) {
         std.debug.print("Error: 'stat' requires a path\n", .{});
-        std.debug.print("Usage: vb sftp stat <path>\n", .{});
+        std.debug.print("Usage: sl sftpstat <path>\n", .{});
         std.process.exit(1);
     }
 

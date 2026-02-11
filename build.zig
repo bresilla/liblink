@@ -91,28 +91,28 @@ pub fn build(b: *std.Build) !void {
         .root_module = ex_events_module,
     });
 
-    const vb_module = b.createModule(.{
-        .root_source_file = b.path("bin/vb.zig"),
+    const sl_module = b.createModule(.{
+        .root_source_file = b.path("bin/sl.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    vb_module.addImport("voidbox", voidbox_module);
+    sl_module.addImport("voidbox", voidbox_module);
 
-    const vb_unit_tests = b.addTest(.{
-        .root_module = vb_module,
+    const sl_unit_tests = b.addTest(.{
+        .root_module = sl_module,
     });
-    const run_vb_unit_tests = b.addRunArtifact(vb_unit_tests);
-    test_step.dependOn(&run_vb_unit_tests.step);
+    const run_sl_unit_tests = b.addRunArtifact(sl_unit_tests);
+    test_step.dependOn(&run_sl_unit_tests.step);
 
-    const vb = b.addExecutable(.{
-        .name = "vb",
-        .root_module = vb_module,
+    const sl = b.addExecutable(.{
+        .name = "sl",
+        .root_module = sl_module,
     });
-    b.installArtifact(vb);
+    b.installArtifact(sl);
 
-    const vb_step = b.step("vb", "Compile vb CLI binary");
-    vb_step.dependOn(&vb.step);
+    const sl_step = b.step("sl", "Compile sl CLI binary");
+    sl_step.dependOn(&sl.step);
 
     const examples_step = b.step("examples", "Compile embedder examples");
     examples_step.dependOn(&ex_shell.step);
