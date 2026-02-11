@@ -8,6 +8,7 @@ pub const protocol = struct {
     pub const kex_init = @import("protocol/kex_init.zig");
     pub const kex_reply = @import("protocol/kex_reply.zig");
     pub const kex_cancel = @import("protocol/kex_cancel.zig");
+    pub const kex_curve25519 = @import("protocol/kex_curve25519.zig");
 };
 
 pub const common = struct {
