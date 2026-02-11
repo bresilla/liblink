@@ -161,21 +161,31 @@ pub const UserauthFailure = struct {
         const name_list = try reader.readString(allocator);
         defer allocator.free(name_list);
 
-        // Parse comma-separated list
-        var auth_list = std.ArrayList([]const u8).init(allocator);
+        // Count comma-separated items first
+        var count: usize = 0;
+        var count_iter = std.mem.splitScalar(u8, name_list, ',');
+        while (count_iter.next()) |auth| {
+            const trimmed = std.mem.trim(u8, auth, " \t");
+            if (trimmed.len > 0) count += 1;
+        }
+
+        // Allocate and fill array
+        const authentications = try allocator.alloc([]u8, count);
+        errdefer allocator.free(authentications);
+
+        var i: usize = 0;
         errdefer {
-            for (auth_list.items) |item| {
+            for (authentications[0..i]) |item| {
                 allocator.free(item);
             }
-            auth_list.deinit();
         }
 
         var iter = std.mem.splitScalar(u8, name_list, ',');
         while (iter.next()) |auth| {
             const trimmed = std.mem.trim(u8, auth, " \t");
             if (trimmed.len > 0) {
-                const auth_copy = try allocator.dupe(u8, trimmed);
-                try auth_list.append(auth_copy);
+                authentications[i] = try allocator.dupe(u8, trimmed);
+                i += 1;
             }
         }
 
@@ -183,7 +193,7 @@ pub const UserauthFailure = struct {
         const partial_success = partial_success_byte != 0;
 
         return UserauthFailure{
-            .authentications = try auth_list.toOwnedSlice(),
+            .authentications = authentications,
             .partial_success = partial_success,
         };
     }
