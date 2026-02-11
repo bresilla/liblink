@@ -4,6 +4,7 @@ const std = @import("std");
 pub const protocol = struct {
     pub const wire = @import("protocol/wire.zig");
     pub const random = @import("protocol/random.zig");
+    pub const obfuscation = @import("protocol/obfuscation.zig");
 };
 
 pub const common = struct {
