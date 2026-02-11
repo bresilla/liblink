@@ -6,6 +6,7 @@ pub const protocol = struct {
     pub const random = @import("protocol/random.zig");
     pub const obfuscation = @import("protocol/obfuscation.zig");
     pub const kex_init = @import("protocol/kex_init.zig");
+    pub const kex_reply = @import("protocol/kex_reply.zig");
 };
 
 pub const common = struct {
