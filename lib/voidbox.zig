@@ -13,6 +13,7 @@ pub const protocol = struct {
     pub const ssh_packet = @import("protocol/ssh_packet.zig");
     pub const quic_streams = @import("protocol/quic_streams.zig");
     pub const channel = @import("protocol/channel.zig");
+    pub const ext_info = @import("protocol/ext_info.zig");
 };
 
 pub const common = struct {
