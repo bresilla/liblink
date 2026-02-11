@@ -5,6 +5,7 @@ pub const protocol = struct {
     pub const wire = @import("protocol/wire.zig");
     pub const random = @import("protocol/random.zig");
     pub const obfuscation = @import("protocol/obfuscation.zig");
+    pub const kex_init = @import("protocol/kex_init.zig");
 };
 
 pub const common = struct {
