@@ -110,7 +110,7 @@ pub const ChannelOpen = struct {
         const maximum_packet_size = try reader.readUint32();
 
         // Remaining bytes are type-specific data
-        const remaining = data[reader.pos..];
+        const remaining = data[reader.offset..];
         const type_specific_data = try allocator.dupe(u8, remaining);
 
         return ChannelOpen{
@@ -174,7 +174,7 @@ pub const ChannelOpenConfirmation = struct {
         const initial_window_size = try reader.readUint32();
         const maximum_packet_size = try reader.readUint32();
 
-        const remaining = data[reader.pos..];
+        const remaining = data[reader.offset..];
         const type_specific_data = try allocator.dupe(u8, remaining);
 
         return ChannelOpenConfirmation{
@@ -407,7 +407,7 @@ pub const ChannelRequest = struct {
         const want_reply_byte = try reader.readByte();
         const want_reply = want_reply_byte != 0;
 
-        const remaining = data[reader.pos..];
+        const remaining = data[reader.offset..];
         const type_specific_data = try allocator.dupe(u8, remaining);
 
         return ChannelRequest{

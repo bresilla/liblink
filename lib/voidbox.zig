@@ -24,4 +24,5 @@ pub const crypto = @import("crypto/crypto.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("protocol/integration_test.zig");
 }
