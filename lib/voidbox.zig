@@ -10,6 +10,7 @@ pub const protocol = struct {
     pub const kex_cancel = @import("protocol/kex_cancel.zig");
     pub const kex_curve25519 = @import("protocol/kex_curve25519.zig");
     pub const key_derivation = @import("protocol/key_derivation.zig");
+    pub const ssh_packet = @import("protocol/ssh_packet.zig");
 };
 
 pub const common = struct {
