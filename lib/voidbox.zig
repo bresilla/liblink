@@ -26,6 +26,8 @@ pub const crypto = @import("crypto/crypto.zig");
 
 pub const auth = @import("auth/auth.zig");
 
+pub const sftp = @import("sftp/sftp.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("protocol/integration_test.zig");
