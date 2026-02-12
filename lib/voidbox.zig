@@ -33,6 +33,10 @@ pub const transport = struct {
     pub const quic = @import("transport/quic_transport.zig");
 };
 
+pub const network = struct {
+    pub const udp = @import("network/udp.zig");
+};
+
 pub const auth = @import("auth/auth.zig");
 
 pub const sftp = @import("sftp/sftp.zig");
