@@ -3,12 +3,12 @@
     .version = "0.0.1",
     .dependencies = .{
         .zquic = .{
-            .url = "https://github.com/bresilla/zquic/archive/497497f59a7a1245d3056a95f0204bc90c6e9b7b.tar.gz",
-            .hash = "1220f9389bfcba6185e2c6b15614e273230a33f311cfb4c5521e1eb79899483f8eba",
+            .url = "https://github.com/bresilla/zquic/archive/41d7c8bcb810cea7310fb8e8e03ae45b2b78d81c.tar.gz",
+            .hash = "zquic-0.9.5-2rPds5dtEgD4OPuk850jiA7M8l7pGx_BzSukH272YcRl",
         },
         .zcrypto = .{
-            .url = "https://github.com/GhostKellz/zcrypto/archive/5661294270ca14cafbfd3482795e1efe1de044fc.tar.gz",
-            .hash = "zcrypto-0.9.7-rgQAI8_qDgBqWr7_jwJX8-rGLDVYIqN5SnYVl-DW76Qq",
+            .url = "https://github.com/bresilla/zcrypto/archive/5e81af5723d7c6cdb27040a4e0ae6fbb548afdce.tar.gz",
+            .hash = "zcrypto-0.9.7-rgQAI9fqDgCtBXJDz-N2ywcSnQgzRoNjSdqdHdKubfi_",
         },
     },
     .paths = .{
