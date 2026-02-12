@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("syslink");
+const syslink = @import("syslink");
 const sshfs = syslink.sshfs.filesystem;
 const keyfile = @import("syslink").auth.keyfile;
 

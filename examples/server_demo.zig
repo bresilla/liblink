@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("syslink");
+const syslink = @import("syslink");
 
 /// Complete SSH/QUIC Server Demo
 ///
