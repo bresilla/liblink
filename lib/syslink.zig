@@ -30,8 +30,15 @@ pub const kex = struct {
     pub const exchange = @import("kex/exchange.zig");
 };
 
-pub const transport = struct {
-    pub const quic = @import("transport/quic_transport.zig");
+pub const quic = struct {
+    // Custom minimal QUIC implementation for SSH/QUIC
+    // Built from scratch, no external QUIC dependencies
+    pub const packet = @import("quic/packet.zig");
+    pub const frame = @import("quic/frame.zig");
+    pub const stream = @import("quic/stream.zig");
+    pub const connection = @import("quic/connection.zig");
+    pub const crypto = @import("quic/crypto.zig");
+    pub const transport = @import("quic/transport.zig");
 };
 
 pub const network = struct {

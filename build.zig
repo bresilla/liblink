@@ -19,11 +19,7 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // Get dependencies
-    const zquic = b.dependency("zquic", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    // No external dependencies - building custom QUIC
 
     const syslink_module = b.createModule(.{
         .root_source_file = b.path("lib/syslink.zig"),
@@ -31,7 +27,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    syslink_module.addImport("zquic", zquic.module("zquic"));
 
     _ = b.addModule("syslink", .{
         .root_source_file = b.path("lib/syslink.zig"),

@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 // Import modules
 const kex_exchange = @import("kex/exchange.zig");
-const quic_transport = @import("transport/quic_transport.zig");
+const quic = @import("quic/transport.zig");
 const udp = @import("network/udp.zig");
 const constants = @import("common/constants.zig");
 const auth = @import("auth/auth.zig");
@@ -58,7 +58,7 @@ pub const ServerConfig = struct {
 /// Active SSH/QUIC client connection
 pub const ClientConnection = struct {
     allocator: Allocator,
-    transport: quic_transport.QuicTransport,
+    transport: quic.QuicTransport,
     kex: kex_exchange.ClientKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -81,7 +81,7 @@ pub const ClientConnection = struct {
             config.server_address,
             config.server_port,
         );
-        defer udp_transport.deinit();
+        // NOTE: Don't deinit udp_transport - we'll pass its socket to QUIC
 
         // Initialize key exchange
         var kex = kex_exchange.ClientKeyExchange.init(allocator, config.random);
@@ -109,15 +109,27 @@ pub const ClientConnection = struct {
 
         // Initialize QUIC transport with SSH-derived secrets
         std.log.info("Initializing QUIC connection...", .{});
-        var transport = try quic_transport.QuicTransport.init(
+
+        // TODO: Extract actual connection IDs from key exchange
+        const local_conn_id = "client-conn-id";
+        const remote_conn_id = "server-conn-id";
+
+        var transport = try quic.QuicTransport.init(
             allocator,
-            config.server_address,
-            config.server_port,
-            &secrets.client_secret,
-            &secrets.server_secret,
+            udp_transport.socket.socket, // Reuse UDP socket
+            local_conn_id,
+            remote_conn_id,
+            secrets.client_secret,
+            secrets.server_secret,
             false, // client mode
         );
         errdefer transport.deinit();
+
+        // Set server address for client to send packets to
+        var server_storage: std.posix.sockaddr.storage = undefined;
+        const server_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&udp_transport.socket.address.any);
+        @memcpy(std.mem.asBytes(&server_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(server_sockaddr_ptr));
+        transport.peer_address = server_storage;
 
         std.log.info("SSH/QUIC connection established", .{});
 
@@ -169,8 +181,18 @@ pub const ClientConnection = struct {
         const request_data = try auth_client.authenticatePassword(password);
         defer self.allocator.free(request_data);
 
+        // Open stream 0 for authentication (stream 0 should be first bidirectional stream)
+        _ = self.transport.openStream() catch |err| blk: {
+            // Stream might already exist, that's OK
+            std.log.debug("Stream 0 open result: {}", .{err});
+            break :blk 0;
+        };
+
         // Send on stream 0 (authentication stream)
         try self.transport.sendOnStream(0, request_data);
+
+        // Poll for response (wait up to 5 seconds)
+        try self.transport.poll(5000);
 
         // Receive response
         var response_buffer: [4096]u8 = undefined;
@@ -219,6 +241,9 @@ pub const ClientConnection = struct {
 
             try self.transport.sendOnStream(0, query_data);
 
+            // Poll for response
+            try self.transport.poll(5000);
+
             var response_buffer: [4096]u8 = undefined;
             const response_len = try self.transport.receiveFromStream(0, &response_buffer);
             const response_data = response_buffer[0..response_len];
@@ -244,6 +269,9 @@ pub const ClientConnection = struct {
 
             try self.transport.sendOnStream(0, auth_data);
 
+            // Poll for response
+            try self.transport.poll(5000);
+
             var response_buffer: [4096]u8 = undefined;
             const response_len = try self.transport.receiveFromStream(0, &response_buffer);
             const response_data = response_buffer[0..response_len];
@@ -263,6 +291,9 @@ pub const ClientConnection = struct {
         defer self.allocator.free(none_data);
 
         try self.transport.sendOnStream(0, none_data);
+
+        // Poll for response
+        try self.transport.poll(5000);
 
         var response_buffer: [4096]u8 = undefined;
         const response_len = try self.transport.receiveFromStream(0, &response_buffer);
@@ -336,7 +367,7 @@ pub const ClientConnection = struct {
 /// Active SSH/QUIC server connection handler
 pub const ServerConnection = struct {
     allocator: Allocator,
-    transport: quic_transport.QuicTransport,
+    transport: quic.QuicTransport,
     kex: kex_exchange.ServerKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -344,57 +375,18 @@ pub const ServerConnection = struct {
 
     /// Accept and handle an incoming SSH/QUIC connection
     ///
-    /// This performs:
-    /// 1. Process SSH_QUIC_INIT
-    /// 2. Perform key exchange and derive secrets
-    /// 3. Initialize QUIC connection with derived secrets
-    ///
-    /// Note: This is used for testing. For production, use ConnectionListener.acceptConnection()
-    /// which also handles UDP I/O.
+    /// DEPRECATED: Use ConnectionListener.acceptConnection() instead.
+    /// This function cannot work with the new QUIC implementation as it requires
+    /// a UDP socket from the key exchange phase.
     pub fn accept(
         allocator: Allocator,
         config: ServerConfig,
         init_data: []const u8,
     ) !Self {
-        std.log.info("Processing SSH_QUIC_INIT ({} bytes)...", .{init_data.len});
-
-        // Initialize server key exchange
-        var kex = kex_exchange.ServerKeyExchange.init(allocator, config.random);
-        errdefer kex.deinit();
-
-        // Process init and create reply
-        const result = try kex.processInitAndCreateReply(
-            init_data,
-            config.quic_versions,
-            config.quic_params,
-            config.host_key,
-            config.host_private_key,
-        );
-        defer allocator.free(result.reply_data);
-
-        // Note: reply_data is created but not sent (caller would need to send it)
-        std.log.info("Created SSH_QUIC_REPLY ({} bytes)", .{result.reply_data.len});
-
-        // Initialize QUIC transport with derived secrets
-        var transport = try quic_transport.QuicTransport.init(
-            allocator,
-            config.listen_address,
-            config.listen_port,
-            &result.client_secret,
-            &result.server_secret,
-            true, // server mode
-        );
-        errdefer transport.deinit();
-
-        // Initialize channel manager
-        const channel_manager = channels.ChannelManager.init(allocator, &transport, true);
-
-        return Self{
-            .allocator = allocator,
-            .transport = transport,
-            .kex = kex,
-            .channel_manager = channel_manager,
-        };
+        _ = allocator;
+        _ = config;
+        _ = init_data;
+        return error.DeprecatedUseConnectionListener;
     }
 
     pub fn deinit(self: *Self) void {
@@ -454,6 +446,9 @@ pub const ServerConnection = struct {
             auth_server.setPublicKeyValidator(validator);
             std.log.debug("Public key authentication enabled", .{});
         }
+
+        // Poll for incoming authentication request (wait up to 30 seconds)
+        try self.transport.poll(30000);
 
         // Receive authentication request on stream 0
         var request_buffer: [4096]u8 = undefined;
@@ -637,15 +632,30 @@ pub const ConnectionListener = struct {
 
         // Initialize QUIC transport with derived secrets
         std.log.info("Initializing QUIC connection...", .{});
-        var transport = try quic_transport.QuicTransport.init(
+
+        // TODO: Extract actual connection IDs from key exchange
+        const local_conn_id = "server-conn-id";
+        const remote_conn_id = "client-conn-id";
+
+        // Set client address for server socket (for sendto)
+        self.udp_transport.socket.address = init_result.client_address;
+
+        var transport = try quic.QuicTransport.init(
             self.allocator,
-            self.config.listen_address,
-            self.config.listen_port,
-            &result.client_secret,
-            &result.server_secret,
+            self.udp_transport.socket.socket, // Reuse UDP socket
+            local_conn_id,
+            remote_conn_id,
+            result.client_secret,
+            result.server_secret,
             true, // server mode
         );
         errdefer transport.deinit();
+
+        // Store client address in transport (convert Address to sockaddr.storage)
+        var client_storage: std.posix.sockaddr.storage = undefined;
+        const client_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&init_result.client_address.any);
+        @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
+        transport.peer_address = client_storage;
 
         // Initialize channel manager
         const channel_manager = channels.ChannelManager.init(self.allocator, &transport, true);

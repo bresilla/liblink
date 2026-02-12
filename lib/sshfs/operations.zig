@@ -239,9 +239,9 @@ export fn sshfs_readdir(
         ctx.allocator.free(sftp_entries);
     }
 
-    // Convert to cache entries and add to filler
-    var cache_entries = std.ArrayList(DirCache.DirEntry).init(ctx.allocator);
-    defer cache_entries.deinit();
+    // Convert to cache entries
+    var cache_entries_buf: [1024]DirCache.DirEntry = undefined;
+    var cache_count: usize = 0;
 
     for (sftp_entries) |entry| {
         // Skip . and ..
@@ -256,20 +256,23 @@ export fn sshfs_readdir(
         _ = filler(buf, name_z.ptr, null, 0);
 
         // Add to cache entry list
-        const cache_entry = DirCache.DirEntry{
-            .name = ctx.allocator.dupe(u8, entry.filename) catch continue,
-            .is_dir = entry.attrs.permissions & 0o040000 != 0, // S_IFDIR
-            .size = entry.attrs.size orelse 0,
-            .mtime = @intCast(entry.attrs.mtime orelse 0),
-        };
-        cache_entries.append(cache_entry) catch continue;
+        if (cache_count < cache_entries_buf.len) {
+            cache_entries_buf[cache_count] = DirCache.DirEntry{
+                .name = ctx.allocator.dupe(u8, entry.filename) catch continue,
+                .is_dir = entry.attrs.permissions.? & 0o040000 != 0, // S_IFDIR
+                .size = entry.attrs.size orelse 0,
+                .mtime = @intCast(entry.attrs.mtime orelse 0),
+            };
+            cache_count += 1;
+        }
     }
 
     // Store in cache
-    ctx.dir_cache.put(remote_path, cache_entries.items) catch |err| {
+    const cache_slice = cache_entries_buf[0..cache_count];
+    ctx.dir_cache.put(remote_path, cache_slice) catch |err| {
         std.log.warn("Failed to cache directory listing for {s}: {}", .{ remote_path, err });
         // Clean up entries we couldn't cache
-        for (cache_entries.items) |entry| {
+        for (cache_slice) |entry| {
             entry.deinit(ctx.allocator);
         }
     };

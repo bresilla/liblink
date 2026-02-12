@@ -1,27 +1,329 @@
 # SysLink Implementation Plan
 
+> **⚠️  URGENT PRIORITY:** Phase 0 (Custom QUIC Implementation) is blocking everything.
+> The zquic integration is fundamentally broken and must be replaced with a minimal
+> QUIC implementation tailored for SSH/QUIC before server can work.
+
 ## Current Status (As of 2026-02-12)
 
 ✅ **Completed:**
-- SSH/QUIC protocol foundation
-- Client-side implementation (connection, authentication, channels)
-- SFTP client for file operations
+- SSH/QUIC protocol layer (wire encoding, key exchange, authentication)
+- Client key exchange and secret derivation working
+- Server key exchange working (SSH_QUIC_INIT/REPLY)
+- Host key encoding fixed (Ed25519 SSH blob format)
+- SFTP protocol implementation
 - SSHFS filesystem integration
-- Interactive CLI tools (sl, sshfs)
-- 136/139 tests passing
+- CLI binary (sl) with server/client commands
+
+🚨 **CRITICAL BLOCKER:**
+- **zquic integration fundamentally broken** - TLS-focused, no UDP I/O integration
+- Server creates QUIC transport but has no actual network layer
+- Stream 0 authentication fails because no UDP packets processed
+- QuicTransport is just state machine, no socket handling
 
 🔧 **In Progress:**
-- Server-side implementation
-- Bug fixes and TODO resolution
-- Production hardening
+- Building custom minimal QUIC implementation (Phase 0 - URGENT)
 
 ---
 
-## Phase A: Server Implementation (HIGH PRIORITY)
+## 🔥 Phase 0: Custom QUIC Implementation (URGENT - BLOCKING)
 
-**Goal:** Implement SSH/QUIC server to enable real client-server connections
+**Problem:** zquic is designed for TLS 1.3 handshake. We're bypassing TLS with SSH secrets, but zquic has no clear UDP integration path. The QuicTransport ignores address/port and creates disconnected state machines.
 
-**Timeline:** 1-2 weeks
+**Solution:** Build minimal QUIC implementation tailored for SSH/QUIC spec requirements.
+
+**Timeline:** 2-3 days
+
+**Goal:** Replace lib/transport/quic_transport.zig with proper UDP-integrated QUIC implementation
+
+### Architecture
+
+```
+lib/quic/
+├── packet.zig        # QUIC packet format (Long/Short Header)
+├── frame.zig         # QUIC frames (STREAM, MAX_STREAM_DATA, ACK)
+├── stream.zig        # Bidirectional stream (send/recv buffers)
+├── connection.zig    # Connection state, stream management
+├── crypto.zig        # Packet protection using SSH-derived secrets
+└── transport.zig     # Main API: UDP socket + packet processing
+```
+
+### 0.1. QUIC Packet Format (4-6 hours)
+
+**File:** `lib/quic/packet.zig`
+
+**Tasks:**
+- [ ] Define Long Header format (for initial handshake - minimal, SSH handles this)
+- [ ] Define Short Header format (1-RTT packets with packet number)
+- [ ] Implement packet number encoding/decoding (variable length 1-4 bytes)
+- [ ] Implement header protection (AEAD encryption)
+- [ ] Parse/serialize packet headers
+
+**QUIC Packet Structure:**
+```zig
+pub const ShortHeader = struct {
+    header_form: u1 = 0,      // 0 = Short Header
+    fixed_bit: u1 = 1,        // Always 1
+    spin_bit: u1 = 0,
+    reserved: u2 = 0,
+    key_phase: u1 = 0,
+    packet_number_length: u2,  // 0-3 (1-4 bytes)
+
+    destination_conn_id: []const u8,
+    packet_number: u32,
+
+    pub fn encode(self: Self, buffer: []u8) !usize;
+    pub fn decode(buffer: []const u8) !Self;
+};
+```
+
+**Why:** Every QUIC packet needs proper framing. Keep it simple - just what SSH/QUIC needs.
+
+### 0.2. QUIC Frames (4-6 hours)
+
+**File:** `lib/quic/frame.zig`
+
+**Tasks:**
+- [ ] STREAM frame (stream_id, offset, data, fin)
+- [ ] MAX_STREAM_DATA frame (flow control)
+- [ ] ACK frame (acknowledge received packets)
+- [ ] CONNECTION_CLOSE frame (teardown)
+- [ ] Frame parsing/serialization
+
+**Frame Types Needed:**
+```zig
+pub const FrameType = enum(u8) {
+    stream = 0x08,           // Stream data
+    max_stream_data = 0x05,  // Flow control
+    ack = 0x02,              // Acknowledgment
+    connection_close = 0x1c, // Teardown
+};
+
+pub const StreamFrame = struct {
+    stream_id: u64,
+    offset: u64,
+    data: []const u8,
+    fin: bool,
+
+    pub fn encode(self: Self, buffer: []u8) !usize;
+    pub fn decode(buffer: []const u8) !Self;
+};
+```
+
+**Why:** Frames are the payload inside packets. STREAM frames carry SSH data.
+
+### 0.3. Stream Management (6-8 hours)
+
+**File:** `lib/quic/stream.zig`
+
+**Tasks:**
+- [ ] Bidirectional stream structure
+- [ ] Send buffer (queue outgoing data)
+- [ ] Receive buffer (reassemble incoming data by offset)
+- [ ] Flow control (MAX_STREAM_DATA tracking)
+- [ ] Stream states (open, half-closed, closed)
+
+**Stream Structure:**
+```zig
+pub const Stream = struct {
+    stream_id: u64,
+
+    // Send side
+    send_buffer: std.ArrayList(u8),
+    send_offset: u64,
+    send_max: u64,  // MAX_STREAM_DATA from peer
+
+    // Receive side
+    recv_buffer: std.ArrayList(u8),
+    recv_offset: u64,
+    recv_max: u64,  // Our MAX_STREAM_DATA
+
+    state: StreamState,
+
+    pub fn write(self: *Self, data: []const u8) !void;
+    pub fn read(self: *Self, buffer: []u8) !usize;
+    pub fn close(self: *Self) void;
+};
+```
+
+**Why:** Streams are the core abstraction. SSH channels map directly to QUIC streams.
+
+### 0.4. Connection Management (6-8 hours)
+
+**File:** `lib/quic/connection.zig`
+
+**Tasks:**
+- [ ] Connection state machine
+- [ ] Stream ID management (client: 0,4,8... server: 1,5,9...)
+- [ ] Stream map (stream_id → Stream)
+- [ ] Packet number tracking
+- [ ] ACK tracking (what packets have been acked)
+
+**Connection Structure:**
+```zig
+pub const Connection = struct {
+    allocator: Allocator,
+    streams: std.AutoHashMap(u64, *Stream),
+
+    next_stream_id: u64,  // Next available stream ID
+    is_server: bool,
+
+    // Packet tracking
+    next_packet_number: u32,
+    largest_acked: u32,
+
+    pub fn openStream(self: *Self) !u64;
+    pub fn getStream(self: *Self, stream_id: u64) ?*Stream;
+    pub fn closeStream(self: *Self, stream_id: u64) !void;
+};
+```
+
+**Why:** Connection manages multiple streams and tracks packet state.
+
+### 0.5. Packet Encryption (4-6 hours)
+
+**File:** `lib/quic/crypto.zig`
+
+**Tasks:**
+- [ ] Use SSH-derived secrets (client_secret, server_secret)
+- [ ] AEAD encryption/decryption (AES-256-GCM or ChaCha20-Poly1305)
+- [ ] Packet protection (encrypt payload, authenticate header)
+- [ ] Header protection (mask packet number)
+
+**Crypto Integration:**
+```zig
+pub const PacketProtection = struct {
+    client_key: [32]u8,
+    server_key: [32]u8,
+    is_server: bool,
+
+    pub fn init(client_secret: [32]u8, server_secret: [32]u8, is_server: bool) Self;
+
+    pub fn encryptPacket(self: *Self, packet: []u8, payload: []const u8) !usize;
+    pub fn decryptPacket(self: *Self, packet: []u8) ![]const u8;
+};
+```
+
+**Why:** All QUIC packets must be encrypted. Use SSH key exchange secrets directly.
+
+### 0.6. UDP Transport Integration (8-10 hours)
+
+**File:** `lib/quic/transport.zig`
+
+**Tasks:**
+- [ ] Wrap UDP socket from lib/network/udp.zig
+- [ ] Packet receive loop (UDP → parse → process frames → populate streams)
+- [ ] Packet send queue (stream writes → frames → packet → UDP)
+- [ ] Non-blocking I/O (poll/select)
+- [ ] Timeout handling
+
+**Transport API:**
+```zig
+pub const QuicTransport = struct {
+    allocator: Allocator,
+    socket: std.posix.socket_t,
+    connection: Connection,
+    crypto: PacketProtection,
+
+    pub fn init(
+        allocator: Allocator,
+        socket: std.posix.socket_t,  // Reuse UDP socket from key exchange
+        client_secret: [32]u8,
+        server_secret: [32]u8,
+        is_server: bool,
+    ) !Self;
+
+    // Process incoming UDP packets
+    pub fn poll(self: *Self, timeout_ms: u32) !void;
+
+    // Stream API (used by connection.zig)
+    pub fn openStream(self: *Self) !u64;
+    pub fn sendOnStream(self: *Self, stream_id: u64, data: []const u8) !void;
+    pub fn receiveFromStream(self: *Self, stream_id: u64, buffer: []u8) !usize;
+    pub fn closeStream(self: *Self, stream_id: u64) !void;
+
+    pub fn deinit(self: *Self) void;
+};
+```
+
+**Critical Flow:**
+```zig
+// Server-side receive loop:
+while (true) {
+    try transport.poll(1000);  // Poll for 1 second
+
+    // Now streams are populated with data
+    const auth_data = try transport.receiveFromStream(0, &buffer);
+    // ... process authentication
+}
+```
+
+**Why:** This is the missing piece! Connects UDP I/O to QUIC state machine.
+
+### 0.7. Integration with Existing Code (4-6 hours)
+
+**Tasks:**
+- [ ] Update lib/connection.zig to use new lib/quic/transport.zig
+- [ ] Pass UDP socket from KeyExchangeTransport to QuicTransport
+- [ ] Remove lib/transport/quic_transport.zig (zquic wrapper)
+- [ ] Update lib/channels/ to use new transport
+- [ ] Update tests to use new implementation
+
+**Changes:**
+```zig
+// lib/connection.zig - Server side
+const udp_socket = self.udp_transport.getSocket();  // NEW: expose socket
+
+var transport = try quic.QuicTransport.init(
+    self.allocator,
+    udp_socket,  // Reuse UDP socket!
+    result.client_secret,
+    result.server_secret,
+    true, // server
+);
+
+// Authentication now works because poll() populates streams
+try transport.poll(5000);  // Wait for client to send auth
+const auth_len = try transport.receiveFromStream(0, &buffer);
+```
+
+**Why:** Seamlessly replace broken zquic integration with working implementation.
+
+### 0.8. Testing (4-6 hours)
+
+**Files:**
+- `lib/quic/packet_test.zig`
+- `lib/quic/frame_test.zig`
+- `lib/quic/stream_test.zig`
+- `lib/quic/integration_test.zig`
+
+**Tests:**
+- [ ] Packet encode/decode round-trip
+- [ ] Frame parsing with real data
+- [ ] Stream read/write operations
+- [ ] Connection stream management
+- [ ] End-to-end: client sends, server receives
+- [ ] Multiple concurrent streams
+
+**Success Criteria:**
+```bash
+zig build test  # All quic tests pass
+sl shell user@host  # Client connects and authenticates!
+```
+
+---
+
+## Phase A: Server Implementation (HIGH PRIORITY - depends on Phase 0)
+
+**Goal:** Complete SSH/QUIC server functionality (most code exists, needs integration)
+
+**Timeline:** 3-5 days (reduced - server key exchange and auth already implemented)
+
+**Note:** Once Phase 0 (custom QUIC) is complete, the server should largely work because:
+- Server key exchange already works (SSH_QUIC_INIT/REPLY)
+- Authentication server code exists (lib/auth/server.zig)
+- Channel management exists (lib/channels/)
+- Main gap is integration and testing
 
 ### A1. Server Key Exchange Handler (3-4 days)
 
@@ -602,10 +904,11 @@ pub fn signExchangeHash(
 
 | Phase | Duration | Key Deliverable |
 |-------|----------|----------------|
-| **A: Server** | 1-2 weeks | Working SSH/QUIC server |
+| **0: Custom QUIC** | 2-3 days | Working UDP-integrated QUIC transport |
+| **A: Server** | 3-5 days | Working SSH/QUIC server (should work once QUIC fixed) |
 | **B: TODOs** | 2-3 days | All critical TODOs fixed |
 | **C: Testing** | 1-2 weeks | Production-ready release |
-| **TOTAL** | 3-4 weeks | Complete SSH/QUIC stack |
+| **TOTAL** | 2.5-3.5 weeks | Complete SSH/QUIC stack |
 
 ---
 
@@ -618,20 +921,58 @@ pub fn signExchangeHash(
 
 ---
 
-## Getting Started
+## Next Steps (START HERE)
 
-To begin Phase A:
+### Immediate Action: Phase 0 - Custom QUIC
+
 ```bash
 # Create new branch
-git checkout -b feature/server-implementation
+git checkout -b feature/custom-quic
 
-# Start with A1: Server Key Exchange Handler
-vim lib/kex/exchange.zig
+# Create directory structure
+mkdir -p lib/quic
+
+# Start with packet format (simplest)
+vim lib/quic/packet.zig
+
+# Work order:
+1. lib/quic/packet.zig    - QUIC packet headers
+2. lib/quic/frame.zig     - STREAM, ACK frames
+3. lib/quic/stream.zig    - Stream buffers
+4. lib/quic/connection.zig - Connection state
+5. lib/quic/crypto.zig    - Packet encryption
+6. lib/quic/transport.zig - UDP integration (THE KEY PIECE)
+7. Update lib/connection.zig to use new transport
+8. Test end-to-end
 
 # Run tests frequently
 zig build test
 
-# Commit often
-git add -p
-git commit -m "feat(server): implement connection ID generation"
+# Commit incrementally
+git add lib/quic/
+git commit -m "feat(quic): implement minimal QUIC packet format"
 ```
+
+### Why This Order?
+
+1. **packet.zig** - Foundation, no dependencies
+2. **frame.zig** - Depends only on packet format
+3. **stream.zig** - Self-contained data structure
+4. **connection.zig** - Uses streams, simple management
+5. **crypto.zig** - Uses existing SSH secrets, straightforward
+6. **transport.zig** - Ties everything together with UDP
+7. **Integration** - Replace zquic wrapper
+
+### Success Checkpoint
+
+After Phase 0 completes, this should work:
+```bash
+# Terminal 1
+sudo ./zig-out/bin/sl server start --port 4433
+
+# Terminal 2
+./zig-out/bin/sl shell bresilla@100.68.79.253:4433
+# Authentication succeeds! 🎉
+```
+
+Then move to Phase A for full server features.

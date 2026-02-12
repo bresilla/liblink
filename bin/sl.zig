@@ -76,8 +76,10 @@ fn printHelp() !void {
         \\    -p, --port <port>           Listen port (default: 2222)
         \\    -h, --host <addr>           Listen address (default: 0.0.0.0)
         \\    -k, --host-key <file>       Host key file (default: ~/.ssh/sl_host_key)
-        \\    -u, --user <user:pass>      Add user credentials
         \\    -d, --daemon                Run as background daemon
+        \\
+        \\NOTE: Server validates against system users (like SSH).
+        \\      Any user with a system account can connect.
         \\
         \\CLIENT OPTIONS:
         \\    -p, --password <pass>       Use password authentication
@@ -87,8 +89,9 @@ fn printHelp() !void {
         \\EXAMPLES:
         \\
         \\  Start server:
-        \\    sl server start -p 2222 -u testuser:testpass
-        \\    sl server start --daemon --host 0.0.0.0 --port 2222
+        \\    sl server start
+        \\    sl server start -p 2222
+        \\    sudo sl server start --daemon
         \\
         \\  Connect to server:
         \\    sl shell testuser@192.168.1.100:2222
@@ -143,8 +146,6 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var listen_addr: []const u8 = "0.0.0.0";
     var listen_port: u16 = 2222;
     var daemon_mode = false;
-    var username: []const u8 = "testuser";
-    var password: []const u8 = "testpass";
     var host_key_path: ?[]const u8 = null;
 
     // Parse arguments
@@ -177,19 +178,6 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 std.process.exit(1);
             }
             host_key_path = args[i];
-        } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
-            i += 1;
-            if (i >= args.len) {
-                std.debug.print("Error: --user requires user:pass format\n", .{});
-                std.process.exit(1);
-            }
-            if (std.mem.indexOf(u8, args[i], ":")) |colon_pos| {
-                username = args[i][0..colon_pos];
-                password = args[i][colon_pos + 1 ..];
-            } else {
-                std.debug.print("Error: --user format should be user:pass\n", .{});
-                std.process.exit(1);
-            }
         }
     }
 
@@ -197,24 +185,26 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("Configuration:\n", .{});
     std.debug.print("  Listen: {s}:{d}\n", .{ listen_addr, listen_port });
     std.debug.print("  Daemon: {}\n", .{daemon_mode});
-    std.debug.print("  User: {s}\n\n", .{username});
+    std.debug.print("  Auth: System users (like SSH)\n\n", .{});
 
     // Generate or load host key
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var host_private_key: [64]u8 = undefined;
-    var host_public_key: [32]u8 = undefined;
-
     if (host_key_path) |_| {
         std.debug.print("Note: Host key loading not yet implemented, using generated key\n", .{});
     }
 
-    // Generate temporary keys
-    random.bytes(&host_private_key);
-    random.bytes(&host_public_key);
+    // Generate Ed25519 keypair properly
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const ed_keypair = Ed25519.KeyPair.generate();
 
-    const host_key_str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated";
+    var host_private_key: [64]u8 = undefined;
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+
+    // Encode host key as proper SSH blob
+    const host_key_blob = try encodeHostKeyBlob(allocator, &ed_keypair.public_key.bytes);
+    defer allocator.free(host_key_blob);
 
     std.debug.print("Starting server...\n", .{});
 
@@ -222,7 +212,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         allocator,
         listen_addr,
         listen_port,
-        host_key_str,
+        host_key_blob,
         &host_private_key,
         random,
     ) catch |err| {
@@ -257,13 +247,39 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         std.debug.print("✓ Client connected\n", .{});
 
-        // Handle authentication  - using simple validators
+        // Handle authentication - validate against system users
         const Validators = struct {
             fn passValidator(user: []const u8, pass: []const u8) bool {
-                // For demo, accept testuser:testpass
-                return std.mem.eql(u8, user, "testuser") and std.mem.eql(u8, pass, "testpass");
+                // Check if user exists on system
+                const c = @cImport({
+                    @cInclude("pwd.h");
+                    @cInclude("unistd.h");
+                    @cInclude("string.h");
+                });
+
+                // Need null-terminated string for C
+                var user_buf: [256]u8 = undefined;
+                if (user.len >= user_buf.len) return false;
+                @memcpy(user_buf[0..user.len], user);
+                user_buf[user.len] = 0;
+
+                const pwd = c.getpwnam(@ptrCast(&user_buf));
+                if (pwd == null) {
+                    std.debug.print("  ✗ User '{s}' not found on system\n", .{user});
+                    return false;
+                }
+
+                // TODO: Real password validation via PAM
+                // For now: accept any password if user exists (INSECURE - for demo only)
+                _ = pass;
+                std.debug.print("  ✓ User '{s}' exists (accepting any password for demo)\n", .{user});
+                std.debug.print("  ⚠️  WARNING: Password validation not implemented - this is INSECURE!\n", .{});
+                return true;
             }
-            fn keyValidator(_: []const u8, _: []const u8, _: []const u8) bool {
+
+            fn keyValidator(user: []const u8, _: []const u8, _: []const u8) bool {
+                // TODO: Check ~/.ssh/authorized_keys for the user
+                std.debug.print("  ✗ Public key auth not implemented yet for user '{s}'\n", .{user});
                 return false;
             }
         };
@@ -894,4 +910,28 @@ fn runUmountCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
     _ = allocator;
     std.debug.print("Unmounting: {s}\n", .{args[0]});
     std.debug.print("Note: SSHFS/FUSE integration not yet implemented\n", .{});
+}
+
+/// Encode Ed25519 public key as SSH host key blob
+/// Format: string("ssh-ed25519") || string(32-byte public key)
+fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
+    const algorithm = "ssh-ed25519";
+    const blob_size = 4 + algorithm.len + 4 + public_key.len;
+    const blob = try allocator.alloc(u8, blob_size);
+    errdefer allocator.free(blob);
+
+    var offset: usize = 0;
+
+    // Write algorithm name length + name
+    std.mem.writeInt(u32, blob[offset..][0..4], @intCast(algorithm.len), .big);
+    offset += 4;
+    @memcpy(blob[offset .. offset + algorithm.len], algorithm);
+    offset += algorithm.len;
+
+    // Write public key length + key
+    std.mem.writeInt(u32, blob[offset..][0..4], @intCast(public_key.len), .big);
+    offset += 4;
+    @memcpy(blob[offset .. offset + public_key.len], public_key);
+
+    return blob;
 }

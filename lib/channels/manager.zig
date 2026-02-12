@@ -1,7 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const channel_protocol = @import("../protocol/channel.zig");
-const quic_transport = @import("../transport/quic_transport.zig");
+const quic = @import("../quic/transport.zig");
 
 /// Channel Manager
 ///
@@ -10,7 +10,7 @@ const quic_transport = @import("../transport/quic_transport.zig");
 
 pub const ChannelManager = struct {
     allocator: Allocator,
-    transport: *quic_transport.QuicTransport,
+    transport: *quic.QuicTransport,
     channels: std.AutoHashMap(u64, *ChannelInfo),
     next_client_stream_id: u64, // For client-initiated streams (4, 8, 12, ...)
 
@@ -28,7 +28,7 @@ pub const ChannelManager = struct {
         }
     };
 
-    pub fn init(allocator: Allocator, transport: *quic_transport.QuicTransport, is_server: bool) Self {
+    pub fn init(allocator: Allocator, transport: *quic.QuicTransport, is_server: bool) Self {
         return Self{
             .allocator = allocator,
             .transport = transport,

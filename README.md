@@ -7,7 +7,7 @@ A complete implementation of the SSH/QUIC protocol in Zig, providing secure remo
 ### Core Protocol
 - ✅ **SSH/QUIC Protocol** - Full implementation of draft-denis-ssh-quic
 - ✅ **Modern Cryptography** - Ed25519 signatures, X25519 key exchange, HKDF-SHA256
-- ✅ **QUIC Transport** - UDP-based multiplexed transport via zquic
+- 🔧 **QUIC Transport** - Custom minimal QUIC implementation (UDP-based multiplexed transport)
 - ✅ **One-RTT Key Exchange** - Fast connection establishment over UDP
 
 ### Client & Server
@@ -372,8 +372,8 @@ syslink/
 ### Prerequisites
 
 - Zig 0.15.2 or later
-- zquic library
-- zcrypto library
+- No external dependencies - uses Zig std.crypto for cryptography
+- Custom QUIC implementation built from scratch
 
 ### Building
 
@@ -528,9 +528,9 @@ See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for detailed status.
 ## Acknowledgments
 
 - Zig programming language and community
-- zquic - QUIC implementation for Zig
-- zcrypto - Cryptographic primitives for Zig
+- Zig standard library (std.crypto for cryptographic primitives)
 - OpenSSH project for SSH protocol reference
+- draft-denis-ssh-quic specification authors
 
 ## Contact
 
