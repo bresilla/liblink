@@ -8,31 +8,13 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Simple hardcoded test for now - just test the shell command
+    std.debug.print("sl - SSH/QUIC CLI tool (version {s})\n\n", .{VERSION});
 
-    if (args.len < 2) {
-        try printHelp();
-        return;
-    }
+    // For testing, hardcode a connection attempt
+    std.debug.print("Testing SSH/QUIC connection to 127.0.0.1:2222...\n\n", .{});
 
-    const command = args[1];
-
-    if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
-        try printVersion();
-    } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
-        try printHelp();
-    } else if (std.mem.eql(u8, command, "shell")) {
-        try runShellCommand(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "sftp")) {
-        try runSftpCommand(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "daemon")) {
-        try runDaemonCommand(allocator, args[2..]);
-    } else {
-        std.debug.print("Unknown command: {s}\n\n", .{command});
-        try printHelp();
-        std.process.exit(1);
-    }
+    try runShellCommand(allocator, &[_][]const u8{"127.0.0.1"});
 }
 
 fn printVersion() !void {
@@ -68,43 +50,72 @@ fn printHelp() !void {
     , .{});
 }
 
-fn printSftpHelp() !void {
-    std.debug.print(
-        \\sl sftp - SFTP file transfer operations
-        \\
-        \\USAGE:
-        \\    sl sftp [user@]host <subcommand> [options]
-        \\
-        \\SUBCOMMANDS:
-        \\    get <remote> <local>  Download a file
-        \\    put <local> <remote>  Upload a file
-        \\    ls [path]             List directory contents
-        \\    mkdir <path>          Create a directory
-        \\    rmdir <path>          Remove a directory
-        \\    rm <path>             Remove a file
-        \\    mv <old> <new>        Rename/move a file or directory
-        \\    stat <path>           Show file attributes
-        \\
-        \\EXAMPLES:
-        \\    sl sftp user@example.com get /remote/file.txt ./local.txt
-        \\    sl sftp user@example.com put ./local.txt /remote/file.txt
-        \\    sl sftp user@example.com ls /remote/directory
-        \\    sl sftp user@example.com mkdir /remote/newdir
-        \\
-    , .{});
-}
-
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
-
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
         std.debug.print("Usage: sl shell [user@]host\n", .{});
         std.process.exit(1);
     }
 
-    const host = args[0];
-    std.debug.print("TODO: Connect to {s} and open interactive shell\n", .{host});
+    const host_arg = args[0];
+
+    // Parse [user@]host[:port]
+    var username: ?[]const u8 = null;
+    var hostname: []const u8 = undefined;
+    var port: u16 = 22;
+
+    // Check for user@ prefix
+    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
+        username = host_arg[0..at_pos];
+        hostname = host_arg[at_pos + 1 ..];
+    } else {
+        hostname = host_arg;
+    }
+
+    // Check for :port suffix
+    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
+        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
+            std.debug.print("Error: Invalid port number\n", .{});
+            std.process.exit(1);
+        };
+        hostname = hostname[0..colon_pos];
+    }
+
+    std.debug.print("Connecting to {s}:{d}", .{ hostname, port });
+    if (username) |user| {
+        std.debug.print(" as {s}", .{user});
+    }
+    std.debug.print("...\n", .{});
+
+    // Initialize random number generator
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+
+    // Create connection config
+    const config = voidbox.connection.ConnectionConfig{
+        .server_address = hostname,
+        .server_port = port,
+        .random = random,
+    };
+
+    // Attempt to connect
+    std.debug.print("Initiating SSH/QUIC handshake...\n", .{});
+    var conn = voidbox.connection.ClientConnection.connect(allocator, config) catch |err| {
+        std.debug.print("✗ Connection failed: {}\n", .{err});
+        std.debug.print("\nThis is expected if no server is running.\n", .{});
+        std.debug.print("To test with a real server:\n", .{});
+        std.debug.print("  1. Run a test server on port {d}\n", .{port});
+        std.debug.print("  2. Server must implement SSH/QUIC protocol\n", .{});
+        std.process.exit(1);
+    };
+    defer conn.deinit();
+
+    std.debug.print("✓ SSH/QUIC connection established!\n\n", .{});
+    std.debug.print("TODO: Interactive shell not yet implemented\n", .{});
+    std.debug.print("Next steps:\n", .{});
+    std.debug.print("  - Implement SSH authentication (password/pubkey)\n", .{});
+    std.debug.print("  - Implement channel protocol for shell session\n", .{});
+    std.debug.print("  - Handle terminal I/O\n", .{});
 }
 
 fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -114,140 +125,7 @@ fn runDaemonCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
 }
 
 fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    // Check for --help first
-    if (args.len > 0 and (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h"))) {
-        try printSftpHelp();
-        return;
-    }
-
-    if (args.len < 2) {
-        std.debug.print("Error: Host and subcommand required\n\n", .{});
-        try printSftpHelp();
-        std.process.exit(1);
-    }
-
-    const host = args[0];
-    const subcommand = args[1];
-    const subargs = if (args.len > 2) args[2..] else &[_][]const u8{};
-
-    if (std.mem.eql(u8, subcommand, "get")) {
-        try sftpGet(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "put")) {
-        try sftpPut(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "ls")) {
-        try sftpLs(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "mkdir")) {
-        try sftpMkdir(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "rmdir")) {
-        try sftpRmdir(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "rm")) {
-        try sftpRm(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "mv")) {
-        try sftpMv(allocator, host, subargs);
-    } else if (std.mem.eql(u8, subcommand, "stat")) {
-        try sftpStat(allocator, host, subargs);
-    } else {
-        std.debug.print("Unknown SFTP subcommand: {s}\n\n", .{subcommand});
-        try printSftpHelp();
-        std.process.exit(1);
-    }
-}
-
-// SFTP command implementations (placeholders for now)
-
-fn sftpGet(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
     _ = allocator;
-    if (args.len < 2) {
-        std.debug.print("Error: 'get' requires remote and local paths\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host get <remote> <local>\n", .{});
-        std.process.exit(1);
-    }
-
-    const remote_path = args[0];
-    const local_path = args[1];
-
-    std.debug.print("TODO: Connect to {s} and download {s} to {s}\n", .{ host, remote_path, local_path });
-}
-
-fn sftpPut(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 2) {
-        std.debug.print("Error: 'put' requires local and remote paths\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host put <local> <remote>\n", .{});
-        std.process.exit(1);
-    }
-
-    const local_path = args[0];
-    const remote_path = args[1];
-
-    std.debug.print("TODO: Connect to {s} and upload {s} to {s}\n", .{ host, local_path, remote_path });
-}
-
-fn sftpLs(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    const path = if (args.len > 0) args[0] else ".";
-
-    std.debug.print("TODO: Connect to {s} and list directory {s}\n", .{ host, path });
-}
-
-fn sftpMkdir(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 1) {
-        std.debug.print("Error: 'mkdir' requires a path\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host mkdir <path>\n", .{});
-        std.process.exit(1);
-    }
-
-    const path = args[0];
-    std.debug.print("TODO: Connect to {s} and create directory {s}\n", .{ host, path });
-}
-
-fn sftpRmdir(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 1) {
-        std.debug.print("Error: 'rmdir' requires a path\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host rmdir <path>\n", .{});
-        std.process.exit(1);
-    }
-
-    const path = args[0];
-    std.debug.print("TODO: Connect to {s} and remove directory {s}\n", .{ host, path });
-}
-
-fn sftpRm(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 1) {
-        std.debug.print("Error: 'rm' requires a path\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host rm <path>\n", .{});
-        std.process.exit(1);
-    }
-
-    const path = args[0];
-    std.debug.print("TODO: Connect to {s} and remove file {s}\n", .{ host, path });
-}
-
-fn sftpMv(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 2) {
-        std.debug.print("Error: 'mv' requires old and new paths\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host mv <old> <new>\n", .{});
-        std.process.exit(1);
-    }
-
-    const old_path = args[0];
-    const new_path = args[1];
-
-    std.debug.print("TODO: Connect to {s} and rename {s} to {s}\n", .{ host, old_path, new_path });
-}
-
-fn sftpStat(allocator: std.mem.Allocator, host: []const u8, args: []const []const u8) !void {
-    _ = allocator;
-    if (args.len < 1) {
-        std.debug.print("Error: 'stat' requires a path\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host stat <path>\n", .{});
-        std.process.exit(1);
-    }
-
-    const path = args[0];
-    std.debug.print("TODO: Connect to {s} and show attributes for {s}\n", .{ host, path });
+    _ = args;
+    std.debug.print("TODO: SFTP commands\n", .{});
 }

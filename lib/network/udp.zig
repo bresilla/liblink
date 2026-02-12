@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const net = std.net;
+const posix = std.posix;
+const Address = std.net.Address;
 
 /// UDP socket for SSH/QUIC initial key exchange
 ///
@@ -9,7 +10,7 @@ const net = std.net;
 
 pub const UdpSocket = struct {
     socket: std.posix.socket_t,
-    address: net.Address,
+    address: Address,
     allocator: Allocator,
     is_server: bool,
 
@@ -24,7 +25,7 @@ pub const UdpSocket = struct {
         server_port: u16,
     ) !Self {
         // Parse server address
-        const address = try net.Address.parseIp4(server_address, server_port);
+        const address = try Address.parseIp4(server_address, server_port);
 
         // Create UDP socket
         const socket = try std.posix.socket(
@@ -51,7 +52,7 @@ pub const UdpSocket = struct {
         listen_port: u16,
     ) !Self {
         // Parse listen address
-        const address = try net.Address.parseIp4(listen_address, listen_port);
+        const address = try Address.parseIp4(listen_address, listen_port);
 
         // Create UDP socket
         const socket = try std.posix.socket(
@@ -147,7 +148,7 @@ pub const UdpSocket = struct {
     /// Returns the received data and the sender's address
     pub fn receiveFrom(self: *Self, max_size: usize) !struct {
         data: []u8,
-        sender: net.Address,
+        sender: Address,
     } {
         const buffer = try self.allocator.alloc(u8, max_size);
         errdefer self.allocator.free(buffer);
@@ -166,8 +167,8 @@ pub const UdpSocket = struct {
         // Resize buffer
         const data = try self.allocator.realloc(buffer, bytes_received);
 
-        // Convert sockaddr to net.Address
-        const sender = net.Address.initPosix(@alignCast(&sender_addr));
+        // Convert sockaddr to Address
+        const sender = Address.initPosix(@alignCast(&sender_addr));
 
         return .{
             .data = data,
@@ -178,7 +179,7 @@ pub const UdpSocket = struct {
     /// Send to specific address (server only)
     ///
     /// Used by server to send SSH_QUIC_REPLY back to client
-    pub fn sendTo(self: *Self, data: []const u8, destination: net.Address) !void {
+    pub fn sendTo(self: *Self, data: []const u8, destination: Address) !void {
         const bytes_sent = try std.posix.sendto(
             self.socket,
             data,
@@ -263,14 +264,14 @@ pub const KeyExchangeTransport = struct {
     /// Returns init data and client address. Caller owns init data memory.
     pub fn receiveInit(self: *Self) !struct {
         init_data: []u8,
-        client_address: net.Address,
+        client_address: Address,
     } {
         // Max SSH_QUIC_INIT size (typically 1200-1500 bytes per spec)
         const max_size = 2048;
 
         const result = try self.socket.receiveFrom(max_size);
 
-        std.log.info("Received SSH_QUIC_INIT from {} ({} bytes)", .{
+        std.log.info("Received SSH_QUIC_INIT from {any} ({} bytes)", .{
             result.sender,
             result.data.len,
         });
@@ -282,10 +283,10 @@ pub const KeyExchangeTransport = struct {
     }
 
     /// Send SSH_QUIC_REPLY (server)
-    pub fn sendReply(self: *Self, reply_data: []const u8, client_address: net.Address) !void {
+    pub fn sendReply(self: *Self, reply_data: []const u8, client_address: Address) !void {
         try self.socket.sendTo(reply_data, client_address);
 
-        std.log.info("Sent SSH_QUIC_REPLY to {} ({} bytes)", .{
+        std.log.info("Sent SSH_QUIC_REPLY to {any} ({} bytes)", .{
             client_address,
             reply_data.len,
         });
