@@ -196,6 +196,11 @@ pub const Limits = struct {
     pub const sftp_default_write_size = 32768;
 };
 
+/// Default constants for key exchange
+pub const KEX_CURVE25519_SHA256 = "curve25519-sha256";
+pub const DEFAULT_SIG_ALGS = "ssh-ed25519,rsa-sha2-256,rsa-sha2-512";
+pub const DEFAULT_CIPHER_SUITE = "TLS_AES_256_GCM_SHA384";
+
 /// Key exchange algorithm names
 pub const KexAlgorithm = enum {
     curve25519_sha256,
