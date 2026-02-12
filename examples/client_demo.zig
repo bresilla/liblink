@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("voidbox");
+const voidbox = @import("syslink");
 
 /// Complete SSH/QUIC Client Demo
 ///
@@ -33,7 +33,7 @@ pub fn main() !void {
     // === Phase 1: Connection ===
     std.debug.print("Phase 1: Establishing connection...\n", .{});
 
-    var connection = voidbox.connection.connectClient(
+    var connection = syslink.connection.connectClient(
         allocator,
         server_host,
         server_port,
@@ -91,7 +91,7 @@ pub fn main() !void {
     std.debug.print("  ✓ SFTP subsystem\n", .{});
 }
 
-fn demoExec(allocator: std.mem.Allocator, connection: *voidbox.connection.ClientConnection) !void {
+fn demoExec(allocator: std.mem.Allocator, connection: *syslink.connection.ClientConnection) !void {
     const command = "echo 'Hello from SSH/QUIC!'";
 
     std.debug.print("  Executing: {s}\n", .{command});
@@ -115,7 +115,7 @@ fn demoExec(allocator: std.mem.Allocator, connection: *voidbox.connection.Client
     std.debug.print("  ✓ Command executed successfully\n", .{});
 }
 
-fn demoShell(allocator: std.mem.Allocator, connection: *voidbox.connection.ClientConnection) !void {
+fn demoShell(allocator: std.mem.Allocator, connection: *syslink.connection.ClientConnection) !void {
     _ = allocator;
 
     std.debug.print("  Opening shell channel...\n", .{});
@@ -131,7 +131,7 @@ fn demoShell(allocator: std.mem.Allocator, connection: *voidbox.connection.Clien
     std.debug.print("  ✓ Shell channel ready for terminal I/O\n", .{});
 }
 
-fn demoSftp(allocator: std.mem.Allocator, connection: *voidbox.connection.ClientConnection) !void {
+fn demoSftp(allocator: std.mem.Allocator, connection: *syslink.connection.ClientConnection) !void {
     std.debug.print("  Opening SFTP subsystem...\n", .{});
 
     var sftp_channel = connection.openSftp() catch |err| {
@@ -143,7 +143,7 @@ fn demoSftp(allocator: std.mem.Allocator, connection: *voidbox.connection.Client
     std.debug.print("  ✓ SFTP channel opened\n", .{});
 
     // Initialize SFTP client
-    var sftp_client = voidbox.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
+    var sftp_client = syslink.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
         std.debug.print("  ✗ SFTP init failed: {}\n", .{err});
         return err;
     };

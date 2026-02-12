@@ -25,31 +25,31 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    const voidbox_module = b.createModule(.{
-        .root_source_file = b.path("lib/voidbox.zig"),
+    const syslink_module = b.createModule(.{
+        .root_source_file = b.path("lib/syslink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    voidbox_module.addImport("zquic", zquic.module("zquic"));
+    syslink_module.addImport("zquic", zquic.module("zquic"));
 
-    _ = b.addModule("voidbox", .{
-        .root_source_file = b.path("lib/voidbox.zig"),
+    _ = b.addModule("syslink", .{
+        .root_source_file = b.path("lib/syslink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const lib = b.addLibrary(.{
-        .name = "voidbox",
-        .root_module = voidbox_module,
+        .name = "syslink",
+        .root_module = syslink_module,
         .linkage = .static,
     });
 
     b.installArtifact(lib);
 
     const exe_unit_tests = b.addTest(.{
-        .root_module = voidbox_module,
+        .root_module = syslink_module,
     });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_shell_module.addImport("voidbox", voidbox_module);
+    ex_shell_module.addImport("syslink", syslink_module);
 
     const ex_shell = b.addExecutable(.{
         .name = "example_embedder_launch_shell",
@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_events_module.addImport("voidbox", voidbox_module);
+    ex_events_module.addImport("syslink", syslink_module);
 
     const ex_events = b.addExecutable(.{
         .name = "example_embedder_events",
@@ -92,7 +92,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    sl_module.addImport("voidbox", voidbox_module);
+    sl_module.addImport("syslink", syslink_module);
 
     const sl_unit_tests = b.addTest(.{
         .root_module = sl_module,
@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    sshfs_module.addImport("voidbox", voidbox_module);
+    sshfs_module.addImport("syslink", syslink_module);
 
     const sshfs = b.addExecutable(.{
         .name = "sshfs",

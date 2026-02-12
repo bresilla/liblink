@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("voidbox");
+const voidbox = @import("syslink");
 
 /// Complete SSH/QUIC Server Demo
 ///
@@ -42,7 +42,7 @@ pub fn main() !void {
     std.debug.print("Starting server listener...\n", .{});
 
     const host_key_str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."; // Placeholder
-    var listener = voidbox.connection.startServer(
+    var listener = syslink.connection.startServer(
         allocator,
         listen_addr,
         listen_port,
@@ -91,7 +91,7 @@ pub fn main() !void {
     }
 }
 
-fn handleClient(allocator: std.mem.Allocator, connection: *voidbox.connection.ServerConnection) !void {
+fn handleClient(allocator: std.mem.Allocator, connection: *syslink.connection.ServerConnection) !void {
     // === Authentication ===
     std.debug.print("Waiting for authentication...\n", .{});
 

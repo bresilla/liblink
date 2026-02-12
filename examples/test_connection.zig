@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("voidbox");
+const voidbox = @import("syslink");
 
 /// Simple test to verify SSH/QUIC connection works
 ///
@@ -25,7 +25,7 @@ pub fn main() !void {
     std.debug.print("Testing SSH/QUIC connection to {}:{}\n\n", .{ server_address, server_port });
 
     // Create connection config
-    const config = voidbox.connection.ConnectionConfig{
+    const config = syslink.connection.ConnectionConfig{
         .server_address = server_address,
         .server_port = server_port,
         .random = random,
@@ -33,7 +33,7 @@ pub fn main() !void {
 
     // Attempt to connect
     std.debug.print("Step 1: Initiating SSH key exchange...\n", .{});
-    var conn = voidbox.connection.ClientConnection.connect(allocator, config) catch |err| {
+    var conn = syslink.connection.ClientConnection.connect(allocator, config) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.debug.print("\nThis is expected if no server is running.\n", .{});
         std.debug.print("To test with a real server:\n", .{});

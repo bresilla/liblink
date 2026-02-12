@@ -1,7 +1,7 @@
 const std = @import("std");
-const voidbox = @import("voidbox");
-const sshfs = voidbox.sshfs.filesystem;
-const keyfile = @import("voidbox").auth.keyfile;
+const voidbox = @import("syslink");
+const sshfs = syslink.sshfs.filesystem;
+const keyfile = @import("syslink").auth.keyfile;
 
 /// SSHFS Command-line Tool
 ///
@@ -204,7 +204,7 @@ fn mountWithPublicKey(
 ) !void {
     // Create SSH connection
     const random = std.crypto.random;
-    var conn = try voidbox.connection.connectClient(
+    var conn = try syslink.connection.connectClient(
         allocator,
         config.hostname,
         config.port,

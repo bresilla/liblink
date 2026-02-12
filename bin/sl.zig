@@ -1,5 +1,5 @@
 const std = @import("std");
-const voidbox = @import("voidbox");
+const syslink = @import("syslink");
 const builtin = @import("builtin");
 
 const VERSION = "0.1.0";
@@ -195,7 +195,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     const random = prng.random();
 
     // Create connection
-    var conn = voidbox.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.debug.print("\nTroubleshooting:\n", .{});
         std.debug.print("  • Is the server running on {s}:{d}?\n", .{ hostname, port });
@@ -240,7 +240,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     try runShellInteractive(allocator, &session);
 }
 
-fn runShellInteractive(allocator: std.mem.Allocator, session: *voidbox.channels.SessionChannel) !void {
+fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
@@ -338,7 +338,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     const random = prng.random();
 
     // Connect
-    var conn = voidbox.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -423,7 +423,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     const random = prng.random();
 
     // Connect
-    var conn = voidbox.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -456,7 +456,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     defer sftp_channel.deinit();
 
     // Initialize SFTP client
-    var sftp_client = voidbox.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
+    var sftp_client = syslink.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
         std.debug.print("✗ Failed to initialize SFTP client: {}\n", .{err});
         std.process.exit(1);
     };
@@ -468,7 +468,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     try runSftpInteractive(allocator, &sftp_client);
 }
 
-fn runSftpInteractive(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient) !void {
+fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient) !void {
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
@@ -582,7 +582,7 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpCl
     try stdout.writeAll("Goodbye.\n");
 }
 
-fn sftpListDirectory(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     const handle = client.opendir(path) catch |err| {
@@ -613,7 +613,7 @@ fn sftpListDirectory(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpCli
     }
 }
 
-fn sftpDownloadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
+fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     const handle = client.open(remote_path, .read, .{}) catch |err| {
@@ -663,7 +663,7 @@ fn sftpDownloadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClie
     try stdout.writeAll(msg);
 }
 
-fn sftpUploadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
+fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
     _ = allocator; // Currently unused but may be needed for future enhancements
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
@@ -713,7 +713,7 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient
     try stdout.writeAll(msg);
 }
 
-fn sftpMkdir(client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     client.mkdir(path, .{}) catch |err| {
@@ -727,7 +727,7 @@ fn sftpMkdir(client: *voidbox.sftp.SftpClient, path: []const u8) !void {
     try stdout.writeAll("\n");
 }
 
-fn sftpRemove(client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+fn sftpRemove(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     client.remove(path) catch |err| {
