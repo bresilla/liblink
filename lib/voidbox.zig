@@ -24,6 +24,14 @@ pub const common = struct {
 
 pub const crypto = @import("crypto/crypto.zig");
 
+pub const kex = struct {
+    pub const shared_secrets = @import("kex/shared_secrets.zig");
+};
+
+pub const transport = struct {
+    pub const quic = @import("transport/quic_transport.zig");
+};
+
 pub const auth = @import("auth/auth.zig");
 
 pub const sftp = @import("sftp/sftp.zig");
