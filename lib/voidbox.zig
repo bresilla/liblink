@@ -15,6 +15,7 @@ pub const protocol = struct {
     pub const channel = @import("protocol/channel.zig");
     pub const ext_info = @import("protocol/ext_info.zig");
     pub const auth = @import("protocol/auth.zig");
+    pub const userauth = @import("protocol/userauth.zig");
 };
 
 pub const common = struct {

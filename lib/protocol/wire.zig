@@ -57,6 +57,9 @@ pub const Reader = struct {
         return value != 0;
     }
 
+    /// Alias for readBoolean
+    pub const readBool = readBoolean;
+
     /// Read uint32 in big-endian format
     pub fn readUint32(self: *Reader) WireError!u32 {
         if (self.remaining() < 4) return error.EndOfBuffer;
@@ -193,6 +196,9 @@ pub const Writer = struct {
     pub fn writeBoolean(self: *Writer, value: bool) WireError!void {
         try self.writeByte(if (value) 1 else 0);
     }
+
+    /// Alias for writeBoolean
+    pub const writeBool = writeBoolean;
 
     /// Write uint32 in big-endian format
     pub fn writeUint32(self: *Writer, value: u32) WireError!void {
