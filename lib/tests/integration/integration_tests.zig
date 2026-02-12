@@ -1,0 +1,16 @@
+const std = @import("std");
+
+// Integration Test Suite Runner
+//
+// This module aggregates all integration tests for the SSH/QUIC implementation.
+// Integration tests validate end-to-end functionality across multiple components.
+
+// Import all integration test modules
+pub const connection = @import("connection_test.zig");
+pub const sftp = @import("sftp_test.zig");
+pub const server_lifecycle = @import("server_lifecycle_test.zig");
+pub const demo_validation = @import("demo_validation_test.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}

@@ -203,7 +203,22 @@ export fn sshfs_readdir(
         path_slice,
     }) catch return -fuse.ENAMETOOLONG;
 
-    // Open directory via SFTP
+    // Add . and ..
+    _ = filler(buf, ".", null, 0);
+    _ = filler(buf, "..", null, 0);
+
+    // Check cache first
+    if (ctx.dir_cache.get(remote_path)) |cached_entries| {
+        // Use cached entries
+        for (cached_entries) |entry| {
+            const name_z = ctx.allocator.dupeZ(u8, entry.name) catch continue;
+            defer ctx.allocator.free(name_z);
+            _ = filler(buf, name_z.ptr, null, 0);
+        }
+        return 0;
+    }
+
+    // Cache miss - fetch from SFTP
     const handle = ctx.sftp_client.opendir(remote_path) catch |err| {
         return switch (err) {
             error.NoSuchFile => -fuse.ENOENT,
@@ -213,26 +228,22 @@ export fn sshfs_readdir(
     };
     defer ctx.sftp_client.close(handle) catch {};
 
-    // Read directory entries
-    // Note: Temporarily not caching directory entries due to ArrayList API issues
-
-    // Add . and ..
-    _ = filler(buf, ".", null, 0);
-    _ = filler(buf, "..", null, 0);
-
-    // Read all entries from SFTP (readdir returns a slice of all entries)
-    const entries = ctx.sftp_client.readdir(handle) catch {
+    // Read all entries from SFTP
+    const sftp_entries = ctx.sftp_client.readdir(handle) catch {
         return -fuse.EIO;
     };
     defer {
-        for (entries) |*entry| {
+        for (sftp_entries) |*entry| {
             entry.deinit(ctx.allocator);
         }
-        ctx.allocator.free(entries);
+        ctx.allocator.free(sftp_entries);
     }
 
-    // Add each entry to filler
-    for (entries) |entry| {
+    // Convert to cache entries and add to filler
+    var cache_entries = std.ArrayList(DirCache.DirEntry).init(ctx.allocator);
+    defer cache_entries.deinit();
+
+    for (sftp_entries) |entry| {
         // Skip . and ..
         if (std.mem.eql(u8, entry.filename, ".") or
             std.mem.eql(u8, entry.filename, "..")) {
@@ -242,11 +253,26 @@ export fn sshfs_readdir(
         // Add to filler
         const name_z = ctx.allocator.dupeZ(u8, entry.filename) catch continue;
         defer ctx.allocator.free(name_z);
-
         _ = filler(buf, name_z.ptr, null, 0);
+
+        // Add to cache entry list
+        const cache_entry = DirCache.DirEntry{
+            .name = ctx.allocator.dupe(u8, entry.filename) catch continue,
+            .is_dir = entry.attrs.permissions & 0o040000 != 0, // S_IFDIR
+            .size = entry.attrs.size orelse 0,
+            .mtime = @intCast(entry.attrs.mtime orelse 0),
+        };
+        cache_entries.append(cache_entry) catch continue;
     }
 
-    // TODO: Cache directory listing
+    // Store in cache
+    ctx.dir_cache.put(remote_path, cache_entries.items) catch |err| {
+        std.log.warn("Failed to cache directory listing for {s}: {}", .{ remote_path, err });
+        // Clean up entries we couldn't cache
+        for (cache_entries.items) |entry| {
+            entry.deinit(ctx.allocator);
+        }
+    };
 
     return 0;
 }

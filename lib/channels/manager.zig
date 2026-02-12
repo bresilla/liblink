@@ -293,6 +293,43 @@ pub const ChannelManager = struct {
         }
         return false;
     }
+
+    /// Get the next expected client stream ID (server-side)
+    ///
+    /// For servers accepting connections from clients, client streams
+    /// are bidirectional streams with IDs 4, 8, 12, 16, etc.
+    pub fn getNextClientStream(self: *const Self) u64 {
+        // Find the highest client stream ID and return next one
+        // Client streams: 4, 8, 12, 16, ...
+        var max_client_stream: u64 = 0;
+        var iter = self.channels.iterator();
+        while (iter.next()) |entry| {
+            const stream_id = entry.key_ptr.*;
+            // Client bidirectional streams have IDs 0x00, 0x04, 0x08, ... (client-initiated)
+            if (stream_id % 4 == 0 and stream_id > 0) {
+                if (stream_id > max_client_stream) {
+                    max_client_stream = stream_id;
+                }
+            }
+        }
+        return if (max_client_stream == 0) 4 else max_client_stream + 4;
+    }
+
+    /// Register a channel with a given type (for manual channel setup)
+    pub fn registerChannel(self: *Self, stream_id: u64, channel_type: []const u8) !void {
+        const info = try self.allocator.create(ChannelInfo);
+        errdefer self.allocator.destroy(info);
+
+        info.* = ChannelInfo{
+            .stream_id = stream_id,
+            .channel_type = try self.allocator.dupe(u8, channel_type),
+            .state = .open,
+            .allocator = self.allocator,
+        };
+        errdefer info.deinit();
+
+        try self.channels.put(stream_id, info);
+    }
 };
 
 /// Information about a received channel request

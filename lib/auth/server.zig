@@ -91,7 +91,7 @@ pub const AuthServer = struct {
     fn handlePublicKeyAuth(
         self: *Self,
         username: []const u8,
-        pk_data: userauth.UserauthRequest.MethodData.publickey,
+        pk_data: userauth.UserauthRequest.PublicKeyData,
         exchange_hash: []const u8,
         _: []const u8, // original_request - not needed
     ) !AuthResponse {
@@ -166,7 +166,7 @@ pub const AuthServer = struct {
         @memcpy(&signature_bytes, raw_signature_bytes);
 
         // Verify signature
-        const valid = crypto.signature.verify(sig_data, &signature_bytes, &public_key);
+        const valid = crypto.signature.verifyEd25519(sig_data, &signature_bytes, &public_key);
 
         if (valid) {
             return self.createSuccess();

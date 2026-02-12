@@ -252,8 +252,40 @@ pub fn mount(
     try fs.mount(opts);
 }
 
-// TODO: Implement public key authentication
-// Need to parse SSH key file format and call authenticatePublicKey with:
-// - algorithm_name (e.g. "ssh-ed25519")
-// - public_key_blob
-// - private_key (64 bytes for Ed25519)
+/// Connect to SSH server with public key authentication
+///
+/// Loads an SSH private key from file and authenticates using public key.
+/// Supports Ed25519 and RSA keys in OpenSSH format.
+///
+/// Example:
+///   try connectWithPublicKey(conn, username, "~/.ssh/id_ed25519");
+pub fn connectWithPublicKey(
+    conn: *connection.ClientConnection,
+    username: []const u8,
+    key_path: []const u8,
+) !bool {
+    const keyfile = @import("../auth/keyfile.zig");
+
+    // Parse the private key file
+    var parsed_key = try keyfile.parsePrivateKeyFile(conn.allocator, key_path);
+    defer parsed_key.deinit();
+
+    std.log.info("Loaded {s} key from {s}", .{ parsed_key.algorithm_name, key_path });
+
+    // Authenticate with the parsed key
+    // For Ed25519, private_key should be 64 bytes (32-byte seed + 32-byte public key)
+    const authed = try conn.authenticatePublicKey(
+        username,
+        parsed_key.algorithm_name,
+        parsed_key.public_key,
+        parsed_key.private_key,
+    );
+
+    if (authed) {
+        std.log.info("Public key authentication successful", .{});
+    } else {
+        std.log.warn("Public key authentication failed", .{});
+    }
+
+    return authed;
+}
