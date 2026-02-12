@@ -4,6 +4,67 @@ const builtin = @import("builtin");
 
 const VERSION = "0.1.0";
 
+fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    // Print prompt
+    try stdout.writeAll(prompt);
+
+    // Disable echo using termios
+    const c = @cImport({
+        @cInclude("termios.h");
+        @cInclude("unistd.h");
+    });
+
+    var old_termios: c.termios = undefined;
+    var new_termios: c.termios = undefined;
+
+    // Get current terminal settings
+    if (c.tcgetattr(stdin.handle, &old_termios) != 0) {
+        return error.TermiosGetFailed;
+    }
+
+    // Copy settings and disable echo
+    new_termios = old_termios;
+    new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
+
+    // Apply new settings
+    if (c.tcsetattr(stdin.handle, c.TCSANOW, &new_termios) != 0) {
+        return error.TermiosSetFailed;
+    }
+
+    // Ensure we restore terminal settings
+    defer {
+        _ = c.tcsetattr(stdin.handle, c.TCSANOW, &old_termios);
+        stdout.writeAll("\n") catch {};
+    }
+
+    // Read password
+    var buffer: [256]u8 = undefined;
+    const bytes_read = try stdin.read(&buffer);
+
+    if (bytes_read == 0) {
+        return error.NoPasswordProvided;
+    }
+
+    // Find newline
+    const line = if (std.mem.indexOfScalar(u8, buffer[0..bytes_read], '\n')) |idx|
+        buffer[0..idx]
+    else
+        buffer[0..bytes_read];
+
+    // Trim any trailing whitespace/newlines
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+
+    if (trimmed.len == 0) {
+        return error.EmptyPassword;
+    }
+
+    // Allocate and return password
+    return try allocator.dupe(u8, trimmed);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -148,7 +209,8 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     // Authenticate (try password for now)
     std.debug.print("Authenticating as {s}...\n", .{username});
-    const password = "password"; // TODO: Prompt for password
+    const password = try getPassword(allocator, "Password: ");
+    defer allocator.free(password);
 
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
@@ -230,7 +292,8 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     defer conn.deinit();
 
     // Authenticate
-    const password = "password"; // TODO: Prompt
+    const password = try getPassword(allocator, "Password: ");
+    defer allocator.free(password);
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
@@ -317,7 +380,8 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     // Authenticate
     std.debug.print("Authenticating...\n", .{});
-    const password = "password"; // TODO: Prompt
+    const password = try getPassword(allocator, "Password: ");
+    defer allocator.free(password);
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);

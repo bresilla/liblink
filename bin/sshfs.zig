@@ -196,11 +196,64 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 }
 
 fn getPassword(allocator: std.mem.Allocator) ![]const u8 {
-    // TODO: Implement password input
-    _ = allocator;
-    std.debug.print("{s}Error:{s} Password authentication via stdin not yet implemented\n", .{ Color.bold_red, Color.reset });
-    std.debug.print("Please pass password via environment variable for now\n", .{});
-    return error.NotImplemented;
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    // Print prompt
+    try stdout.writeAll("Password: ");
+
+    // Disable echo using termios
+    const c = @cImport({
+        @cInclude("termios.h");
+        @cInclude("unistd.h");
+    });
+
+    var old_termios: c.termios = undefined;
+    var new_termios: c.termios = undefined;
+
+    // Get current terminal settings
+    if (c.tcgetattr(stdin.handle, &old_termios) != 0) {
+        return error.TermiosGetFailed;
+    }
+
+    // Copy settings and disable echo
+    new_termios = old_termios;
+    new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
+
+    // Apply new settings
+    if (c.tcsetattr(stdin.handle, c.TCSANOW, &new_termios) != 0) {
+        return error.TermiosSetFailed;
+    }
+
+    // Ensure we restore terminal settings
+    defer {
+        _ = c.tcsetattr(stdin.handle, c.TCSANOW, &old_termios);
+        stdout.writeAll("\n") catch {};
+    }
+
+    // Read password
+    var buffer: [256]u8 = undefined;
+    const bytes_read = try stdin.read(&buffer);
+
+    if (bytes_read == 0) {
+        return error.NoPasswordProvided;
+    }
+
+    // Find newline
+    const line = if (std.mem.indexOfScalar(u8, buffer[0..bytes_read], '\n')) |idx|
+        buffer[0..idx]
+    else
+        buffer[0..bytes_read];
+
+    // Trim any trailing whitespace/newlines
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+
+    if (trimmed.len == 0) {
+        return error.EmptyPassword;
+    }
+
+    // Allocate and return password
+    return try allocator.dupe(u8, trimmed);
 }
 
 pub fn main() !void {

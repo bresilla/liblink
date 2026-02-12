@@ -137,7 +137,7 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(sshfs);
 
     const sshfs_step = b.step("sshfs", "Compile sshfs CLI binary");
-    sshfs_step.dependOn(&sshfs.step);
+    sshfs_step.dependOn(&b.addInstallArtifact(sshfs, .{}).step);
 
     const examples_step = b.step("examples", "Compile embedder examples");
     examples_step.dependOn(&ex_shell.step);
