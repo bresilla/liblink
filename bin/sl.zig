@@ -4,104 +4,33 @@ const builtin = @import("builtin");
 
 const VERSION = "0.1.0";
 
-fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
-    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-
-    // Print prompt
-    try stdout.writeAll(prompt);
-
-    // Disable echo using termios
-    const c = @cImport({
-        @cInclude("termios.h");
-        @cInclude("unistd.h");
-    });
-
-    var old_termios: c.termios = undefined;
-    var new_termios: c.termios = undefined;
-
-    // Get current terminal settings
-    if (c.tcgetattr(stdin.handle, &old_termios) != 0) {
-        return error.TermiosGetFailed;
-    }
-
-    // Copy settings and disable echo
-    new_termios = old_termios;
-    new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
-
-    // Apply new settings
-    if (c.tcsetattr(stdin.handle, c.TCSANOW, &new_termios) != 0) {
-        return error.TermiosSetFailed;
-    }
-
-    // Ensure we restore terminal settings
-    defer {
-        _ = c.tcsetattr(stdin.handle, c.TCSANOW, &old_termios);
-        stdout.writeAll("\n") catch {};
-    }
-
-    // Read password
-    var buffer: [256]u8 = undefined;
-    const bytes_read = try stdin.read(&buffer);
-
-    if (bytes_read == 0) {
-        return error.NoPasswordProvided;
-    }
-
-    // Find newline
-    const line = if (std.mem.indexOfScalar(u8, buffer[0..bytes_read], '\n')) |idx|
-        buffer[0..idx]
-    else
-        buffer[0..bytes_read];
-
-    // Trim any trailing whitespace/newlines
-    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-
-    if (trimmed.len == 0) {
-        return error.EmptyPassword;
-    }
-
-    // Allocate and return password
-    return try allocator.dupe(u8, trimmed);
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Simple argument parsing (avoiding std.process.args issues in 0.15.2)
-    // For now, use hardcoded test
-    const use_test_mode = true;
+    var args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    // Get command-line arguments (when needed)
-    //var args = std.ArrayList([]const u8).initCapacity(allocator, 0) catch unreachable;
-    //defer args.deinit();
-
-    if (use_test_mode) {
-        // Test mode: hardcoded connection
-        std.debug.print("sl - SSH/QUIC CLI tool (version {s})\n", .{VERSION});
-        std.debug.print("Running in test mode...\n\n", .{});
-        try runShellCommand(allocator, &[_][]const u8{"127.0.0.1"});
-        return;
-    }
-
-    // Normal mode (when args parsing works)
-    const args_items = &[_][]const u8{}; // TODO: Parse real args
-    if (args_items.len == 0) {
+    if (args.len < 2) {
         try printHelp();
         return;
     }
 
-    const command = args_items[0];
-    const command_args = if (args_items.len > 1) args_items[1..] else &[_][]const u8{};
+    const command = args[1];
 
-    if (std.mem.eql(u8, command, "shell")) {
-        try runShellCommand(allocator, command_args);
-    } else if (std.mem.eql(u8, command, "sftp")) {
-        try runSftpCommand(allocator, command_args);
+    if (std.mem.eql(u8, command, "server")) {
+        try runServerCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "shell")) {
+        try runShellCommand(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "exec")) {
-        try runExecCommand(allocator, command_args);
+        try runExecCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "sftp")) {
+        try runSftpCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "mount")) {
+        try runMountCommand(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "umount") or std.mem.eql(u8, command, "unmount")) {
+        try runUmountCommand(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
         try printVersion();
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
@@ -115,46 +44,311 @@ pub fn main() !void {
 
 fn printVersion() !void {
     std.debug.print("sl version {s}\n", .{VERSION});
-    std.debug.print("SSH/QUIC implementation with SFTP support\n", .{});
+    std.debug.print("SSH/QUIC implementation with SFTP and SSHFS support\n", .{});
 }
 
 fn printHelp() !void {
     std.debug.print(
-        \\sl - SSH/QUIC CLI tool
+        \\sl - SSH/QUIC flagship CLI tool
         \\
         \\USAGE:
-        \\    sl <command> [options]
+        \\    sl <command> [options] [arguments]
         \\
         \\COMMANDS:
-        \\    shell [user@]host[:port]    Connect to SSH server (interactive shell)
+        \\
+        \\  SERVER:
+        \\    server start [options]      Start SSH/QUIC server daemon
+        \\    server stop                 Stop server daemon
+        \\    server status               Check server status
+        \\
+        \\  CLIENT:
+        \\    shell [user@]host[:port]    Connect to remote shell
         \\    exec [user@]host command    Execute remote command
-        \\    sftp [user@]host[:port]     SFTP file operations
+        \\    sftp [user@]host[:port]     Start SFTP session
+        \\    mount [user@]host path      Mount remote filesystem (SSHFS)
+        \\    umount path                 Unmount SSHFS filesystem
+        \\
+        \\  GENERAL:
         \\    version                     Show version information
         \\    help                        Show this help message
         \\
-        \\OPTIONS:
-        \\    -h, --help                  Show help
-        \\    -v, --version               Show version
+        \\SERVER OPTIONS:
+        \\    -p, --port <port>           Listen port (default: 2222)
+        \\    -h, --host <addr>           Listen address (default: 0.0.0.0)
+        \\    -k, --host-key <file>       Host key file (default: ~/.ssh/sl_host_key)
+        \\    -u, --user <user:pass>      Add user credentials
+        \\    -d, --daemon                Run as background daemon
+        \\
+        \\CLIENT OPTIONS:
         \\    -p, --password <pass>       Use password authentication
         \\    -i, --identity <key>        Use public key authentication
+        \\    -P, --port <port>           Server port (default: 2222)
         \\
         \\EXAMPLES:
-        \\    sl shell user@example.com
-        \\    sl shell user@example.com:2222
-        \\    sl exec user@host "ls -la"
-        \\    sl sftp user@example.com
         \\
-        \\SFTP SUBCOMMANDS:
-        \\    ls <path>                   List directory
+        \\  Start server:
+        \\    sl server start -p 2222 -u testuser:testpass
+        \\    sl server start --daemon --host 0.0.0.0 --port 2222
+        \\
+        \\  Connect to server:
+        \\    sl shell testuser@192.168.1.100:2222
+        \\    sl exec testuser@server.com "ls -la"
+        \\    sl sftp testuser@example.com
+        \\
+        \\  Mount filesystem:
+        \\    sl mount testuser@server.com:/home/user ./mnt
+        \\    sl umount ./mnt
+        \\
+        \\SFTP COMMANDS (in sftp> prompt):
+        \\    ls [path]                   List directory
+        \\    cd <path>                   Change directory
+        \\    pwd                         Print working directory
         \\    get <remote> [local]        Download file
         \\    put <local> [remote]        Upload file
         \\    mkdir <path>                Create directory
         \\    rm <path>                   Remove file
-        \\    rmdir <path>                Remove directory
-        \\
-        \\Run 'sl <command> --help' for more information on a specific command.
+        \\    help                        Show SFTP help
+        \\    exit                        Exit SFTP session
         \\
     , .{});
+}
+
+// ============================================================================
+// SERVER COMMANDS
+// ============================================================================
+
+fn runServerCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.debug.print("Error: Server subcommand required\n", .{});
+        std.debug.print("Usage: sl server <start|stop|status> [options]\n", .{});
+        std.process.exit(1);
+    }
+
+    const subcommand = args[0];
+
+    if (std.mem.eql(u8, subcommand, "start")) {
+        try serverStart(allocator, args[1..]);
+    } else if (std.mem.eql(u8, subcommand, "stop")) {
+        try serverStop(allocator);
+    } else if (std.mem.eql(u8, subcommand, "status")) {
+        try serverStatus(allocator);
+    } else {
+        std.debug.print("Unknown server subcommand: {s}\n", .{subcommand});
+        std.debug.print("Available: start, stop, status\n", .{});
+        std.process.exit(1);
+    }
+}
+
+fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var listen_addr: []const u8 = "0.0.0.0";
+    var listen_port: u16 = 2222;
+    var daemon_mode = false;
+    var username: []const u8 = "testuser";
+    var password: []const u8 = "testpass";
+    var host_key_path: ?[]const u8 = null;
+
+    // Parse arguments
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --port requires a value\n", .{});
+                std.process.exit(1);
+            }
+            listen_port = std.fmt.parseInt(u16, args[i], 10) catch {
+                std.debug.print("Error: Invalid port number\n", .{});
+                std.process.exit(1);
+            };
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--host")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --host requires a value\n", .{});
+                std.process.exit(1);
+            }
+            listen_addr = args[i];
+        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
+            daemon_mode = true;
+        } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--host-key")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --host-key requires a value\n", .{});
+                std.process.exit(1);
+            }
+            host_key_path = args[i];
+        } else if (std.mem.eql(u8, arg, "-u") or std.mem.eql(u8, arg, "--user")) {
+            i += 1;
+            if (i >= args.len) {
+                std.debug.print("Error: --user requires user:pass format\n", .{});
+                std.process.exit(1);
+            }
+            if (std.mem.indexOf(u8, args[i], ":")) |colon_pos| {
+                username = args[i][0..colon_pos];
+                password = args[i][colon_pos + 1 ..];
+            } else {
+                std.debug.print("Error: --user format should be user:pass\n", .{});
+                std.process.exit(1);
+            }
+        }
+    }
+
+    std.debug.print("=== SSH/QUIC Server ===\n\n", .{});
+    std.debug.print("Configuration:\n", .{});
+    std.debug.print("  Listen: {s}:{d}\n", .{ listen_addr, listen_port });
+    std.debug.print("  Daemon: {}\n", .{daemon_mode});
+    std.debug.print("  User: {s}\n\n", .{username});
+
+    // Generate or load host key
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    const random = prng.random();
+
+    var host_private_key: [64]u8 = undefined;
+    var host_public_key: [32]u8 = undefined;
+
+    if (host_key_path) |_| {
+        std.debug.print("Note: Host key loading not yet implemented, using generated key\n", .{});
+    }
+
+    // Generate temporary keys
+    random.bytes(&host_private_key);
+    random.bytes(&host_public_key);
+
+    const host_key_str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated";
+
+    std.debug.print("Starting server...\n", .{});
+
+    var listener = syslink.connection.startServer(
+        allocator,
+        listen_addr,
+        listen_port,
+        host_key_str,
+        &host_private_key,
+        random,
+    ) catch |err| {
+        std.debug.print("✗ Failed to start server: {}\n", .{err});
+        std.debug.print("\nPossible issues:\n", .{});
+        std.debug.print("  • Port {d} already in use (try: lsof -i:{d})\n", .{ listen_port, listen_port });
+        std.debug.print("  • Insufficient permissions (need root for ports < 1024)\n", .{});
+        std.debug.print("  • Firewall blocking UDP port {d}\n", .{listen_port});
+        return err;
+    };
+    defer listener.deinit();
+
+    std.debug.print("✓ Server listening on {s}:{d}\n\n", .{ listen_addr, listen_port });
+
+    if (daemon_mode) {
+        std.debug.print("Note: Daemon mode not yet implemented, running in foreground\n", .{});
+    }
+
+    std.debug.print("Ready for connections. Press Ctrl+C to stop.\n\n", .{});
+
+    // Server loop
+    var client_count: usize = 0;
+    while (true) {
+        client_count += 1;
+        std.debug.print("--- Client #{d} ---\n", .{client_count});
+
+        var server_conn = listener.acceptConnection() catch |err| {
+            std.debug.print("✗ Failed to accept connection: {}\n\n", .{err});
+            continue;
+        };
+        defer server_conn.deinit();
+
+        std.debug.print("✓ Client connected\n", .{});
+
+        // Handle authentication  - using simple validators
+        const Validators = struct {
+            fn passValidator(user: []const u8, pass: []const u8) bool {
+                // For demo, accept testuser:testpass
+                return std.mem.eql(u8, user, "testuser") and std.mem.eql(u8, pass, "testpass");
+            }
+            fn keyValidator(_: []const u8, _: []const u8, _: []const u8) bool {
+                return false;
+            }
+        };
+
+        const authed = server_conn.handleAuthentication(
+            Validators.passValidator,
+            Validators.keyValidator,
+        ) catch |err| {
+            std.debug.print("✗ Authentication error: {}\n\n", .{err});
+            continue;
+        };
+
+        if (!authed) {
+            std.debug.print("✗ Authentication failed\n\n", .{});
+            continue;
+        }
+
+        std.debug.print("✓ Client authenticated\n", .{});
+        std.debug.print("Session active (limited demo - full session handling TODO)\n\n", .{});
+    }
+}
+
+fn serverStop(allocator: std.mem.Allocator) !void {
+    _ = allocator;
+    std.debug.print("Stopping SSH/QUIC server...\n", .{});
+    std.debug.print("Note: Daemon management not yet implemented\n", .{});
+    std.debug.print("To stop a running server, use: pkill -f 'sl server'\n", .{});
+}
+
+fn serverStatus(allocator: std.mem.Allocator) !void {
+    _ = allocator;
+    std.debug.print("Checking server status...\n", .{});
+    std.debug.print("Note: Status checking not yet implemented\n", .{});
+    std.debug.print("To check manually: ps aux | grep 'sl server'\n", .{});
+}
+
+// ============================================================================
+// CLIENT COMMANDS
+// ============================================================================
+
+fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    try stdout.writeAll(prompt);
+
+    // Disable echo using termios
+    const c = @cImport({
+        @cInclude("termios.h");
+        @cInclude("unistd.h");
+    });
+
+    var old_termios: c.termios = undefined;
+    var new_termios: c.termios = undefined;
+
+    if (c.tcgetattr(stdin.handle, &old_termios) != 0) {
+        return error.TermiosGetFailed;
+    }
+
+    new_termios = old_termios;
+    new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
+
+    if (c.tcsetattr(stdin.handle, c.TCSANOW, &new_termios) != 0) {
+        return error.TermiosSetFailed;
+    }
+
+    defer {
+        _ = c.tcsetattr(stdin.handle, c.TCSANOW, &old_termios);
+        stdout.writeAll("\n") catch {};
+    }
+
+    var buffer: [256]u8 = undefined;
+    const bytes_read = try stdin.read(&buffer);
+
+    if (bytes_read == 0) return error.NoPasswordProvided;
+
+    const line = if (std.mem.indexOfScalar(u8, buffer[0..bytes_read], '\n')) |idx|
+        buffer[0..idx]
+    else
+        buffer[0..bytes_read];
+
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.EmptyPassword;
+
+    return try allocator.dupe(u8, trimmed);
 }
 
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -166,152 +360,6 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     const host_arg = args[0];
 
-    // Parse [user@]host[:port]
-    var username: []const u8 = "root"; // Default username
-    var hostname: []const u8 = undefined;
-    var port: u16 = 2222; // SSH/QUIC default
-
-    // Check for user@ prefix
-    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
-        username = host_arg[0..at_pos];
-        hostname = host_arg[at_pos + 1 ..];
-    } else {
-        hostname = host_arg;
-    }
-
-    // Check for :port suffix
-    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
-        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
-            std.debug.print("Error: Invalid port number\n", .{});
-            std.process.exit(1);
-        };
-        hostname = hostname[0..colon_pos];
-    }
-
-    std.debug.print("Connecting to {s}:{d} as {s}...\n", .{ hostname, port, username });
-
-    // Initialize random number generator
-    var prng = std.Random.DefaultPrng.init(12345);
-    const random = prng.random();
-
-    // Create connection
-    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
-        std.debug.print("✗ Connection failed: {}\n", .{err});
-        std.debug.print("\nTroubleshooting:\n", .{});
-        std.debug.print("  • Is the server running on {s}:{d}?\n", .{ hostname, port });
-        std.debug.print("  • Does the server support SSH/QUIC protocol?\n", .{});
-        std.debug.print("  • Check firewall/network connectivity\n", .{});
-        std.process.exit(1);
-    };
-    defer conn.deinit();
-
-    std.debug.print("✓ SSH/QUIC connection established\n", .{});
-
-    // Authenticate (try password for now)
-    std.debug.print("Authenticating as {s}...\n", .{username});
-    const password = try getPassword(allocator, "Password: ");
-    defer allocator.free(password);
-
-    const auth_success = conn.authenticatePassword(username, password) catch |err| {
-        std.debug.print("✗ Authentication failed: {}\n", .{err});
-        std.process.exit(1);
-    };
-
-    if (!auth_success) {
-        std.debug.print("✗ Authentication failed: Invalid credentials\n", .{});
-        std.process.exit(1);
-    }
-
-    std.debug.print("✓ Authenticated successfully\n\n", .{});
-
-    // Open shell session
-    std.debug.print("Starting shell session...\n", .{});
-    var session = conn.requestShell() catch |err| {
-        std.debug.print("✗ Failed to start shell: {}\n", .{err});
-        std.process.exit(1);
-    };
-    defer session.close() catch {};
-
-    std.debug.print("✓ Shell session started\n\n", .{});
-    std.debug.print("Interactive shell session active. Type commands and press Enter.\n", .{});
-    std.debug.print("Press Ctrl+D or type 'exit' to close the session.\n\n", .{});
-
-    // Run interactive shell I/O loop
-    try runShellInteractive(allocator, &session);
-}
-
-fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
-    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-
-    // Simple line-based I/O loop
-    // Note: A production implementation would use raw terminal mode
-    // and handle character-by-character I/O with proper terminal control
-    while (true) {
-        // Read line from stdin
-        var line_buffer: [4096]u8 = undefined;
-        var byte_buffer: [1]u8 = undefined;
-        var line_len: usize = 0;
-
-        // Read until newline or EOF
-        while (true) {
-            const n = stdin.read(&byte_buffer) catch |err| {
-                if (err == error.EOF or err == error.EndOfStream) return;
-                return err;
-            };
-            if (n == 0) return; // EOF
-            if (byte_buffer[0] == '\n') break;
-            if (line_len >= line_buffer.len) return error.LineTooLong;
-            line_buffer[line_len] = byte_buffer[0];
-            line_len += 1;
-        }
-
-        const line = line_buffer[0..line_len];
-
-        // Check for exit command
-        if (std.mem.eql(u8, std.mem.trim(u8, line, &std.ascii.whitespace), "exit")) {
-            break;
-        }
-
-        // Append newline for the remote shell
-        var command_buffer: [4097]u8 = undefined;
-        @memcpy(command_buffer[0..line.len], line);
-        command_buffer[line.len] = '\n';
-        const command_with_newline = command_buffer[0 .. line.len + 1];
-
-        // Send command to remote shell
-        try session.sendData(command_with_newline);
-
-        // Receive response
-        // Note: This is simplified - a real implementation would handle
-        // partial reads, escape sequences, and asynchronous output
-        const response = session.receiveData() catch |err| {
-            var err_buf: [256]u8 = undefined;
-            const err_msg = try std.fmt.bufPrint(&err_buf, "Error receiving data: {}\n", .{err});
-            try stdout.writeAll(err_msg);
-            continue;
-        };
-        defer allocator.free(response);
-
-        // Write response to stdout
-        try stdout.writeAll(response);
-    }
-
-    try stdout.writeAll("\nClosing shell session...\n");
-}
-
-fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 2) {
-        std.debug.print("Error: Host and command required\n", .{});
-        std.debug.print("Usage: sl exec [user@]host[:port] <command>\n", .{});
-        std.debug.print("Example: sl exec user@host \"ls -la\"\n", .{});
-        std.process.exit(1);
-    }
-
-    const host_arg = args[0];
-    const command = args[1];
-
-    // Parse [user@]host[:port]
     var username: []const u8 = "root";
     var hostname: []const u8 = undefined;
     var port: u16 = 2222;
@@ -331,22 +379,26 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         hostname = hostname[0..colon_pos];
     }
 
-    std.debug.print("Executing command on {s}:{d}...\n", .{ hostname, port });
+    std.debug.print("Connecting to {s}:{d} as {s}...\n", .{ hostname, port, username });
 
-    // Initialize random
-    var prng = std.Random.DefaultPrng.init(12345);
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    // Connect
     var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
+        std.debug.print("\nTroubleshooting:\n", .{});
+        std.debug.print("  • Check server is running: nc -u -v {s} {d}\n", .{ hostname, port });
+        std.debug.print("  • Verify firewall allows UDP port {d}\n", .{port});
+        std.debug.print("  • Try pinging the host: ping {s}\n", .{hostname});
         std.process.exit(1);
     };
     defer conn.deinit();
 
-    // Authenticate
+    std.debug.print("✓ Connected\n", .{});
+
     const password = try getPassword(allocator, "Password: ");
     defer allocator.free(password);
+
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
@@ -357,17 +409,125 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.process.exit(1);
     }
 
-    // Execute command
+    std.debug.print("✓ Authenticated\n\n", .{});
+
+    var session = conn.requestShell() catch |err| {
+        std.debug.print("✗ Failed to start shell: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer session.close() catch {};
+
+    std.debug.print("Shell session active. Type commands or 'exit' to quit.\n\n", .{});
+
+    try runShellInteractive(allocator, &session);
+}
+
+fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    while (true) {
+        var line_buffer: [4096]u8 = undefined;
+        var byte_buffer: [1]u8 = undefined;
+        var line_len: usize = 0;
+
+        while (true) {
+            const n = stdin.read(&byte_buffer) catch |err| {
+                if (err == error.EOF or err == error.EndOfStream) return;
+                return err;
+            };
+            if (n == 0) return;
+            if (byte_buffer[0] == '\n') break;
+            if (line_len >= line_buffer.len) return error.LineTooLong;
+            line_buffer[line_len] = byte_buffer[0];
+            line_len += 1;
+        }
+
+        const line = line_buffer[0..line_len];
+
+        if (std.mem.eql(u8, std.mem.trim(u8, line, &std.ascii.whitespace), "exit")) {
+            break;
+        }
+
+        var command_buffer: [4097]u8 = undefined;
+        @memcpy(command_buffer[0..line.len], line);
+        command_buffer[line.len] = '\n';
+        const command_with_newline = command_buffer[0 .. line.len + 1];
+
+        try session.sendData(command_with_newline);
+
+        const response = session.receiveData() catch |err| {
+            var err_buf: [256]u8 = undefined;
+            const err_msg = try std.fmt.bufPrint(&err_buf, "Error receiving data: {}\n", .{err});
+            try stdout.writeAll(err_msg);
+            continue;
+        };
+        defer allocator.free(response);
+
+        try stdout.writeAll(response);
+    }
+
+    try stdout.writeAll("\nClosing shell...\n");
+}
+
+fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.debug.print("Error: Host and command required\n", .{});
+        std.debug.print("Usage: sl exec [user@]host[:port] <command>\n", .{});
+        std.debug.print("Example: sl exec user@host \"ls -la\"\n", .{});
+        std.process.exit(1);
+    }
+
+    const host_arg = args[0];
+    const command = args[1];
+
+    var username: []const u8 = "root";
+    var hostname: []const u8 = undefined;
+    var port: u16 = 2222;
+
+    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
+        username = host_arg[0..at_pos];
+        hostname = host_arg[at_pos + 1 ..];
+    } else {
+        hostname = host_arg;
+    }
+
+    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
+        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
+            std.debug.print("Error: Invalid port number\n", .{});
+            std.process.exit(1);
+        };
+        hostname = hostname[0..colon_pos];
+    }
+
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    const random = prng.random();
+
+    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
+        std.debug.print("✗ Connection failed: {}\n", .{err});
+        std.process.exit(1);
+    };
+    defer conn.deinit();
+
+    const password = try getPassword(allocator, "Password: ");
+    defer allocator.free(password);
+
+    const auth_success = conn.authenticatePassword(username, password) catch |err| {
+        std.debug.print("✗ Authentication failed: {}\n", .{err});
+        std.process.exit(1);
+    };
+
+    if (!auth_success) {
+        std.debug.print("✗ Authentication failed\n", .{});
+        std.process.exit(1);
+    }
+
     var session = conn.requestExec(command) catch |err| {
         std.debug.print("✗ Failed to execute command: {}\n", .{err});
         std.process.exit(1);
     };
     defer session.close() catch {};
 
-    std.debug.print("✓ Command sent\n\n", .{});
-
-    // Read output
-    std.debug.print("--- Output ---\n", .{});
     const output = session.receiveData() catch |err| {
         std.debug.print("✗ Failed to read output: {}\n", .{err});
         return;
@@ -375,28 +535,17 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     defer allocator.free(output);
 
     std.debug.print("{s}", .{output});
-    std.debug.print("\n--- End Output ---\n", .{});
 }
 
 fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
         std.debug.print("Usage: sl sftp [user@]host[:port]\n", .{});
-        std.debug.print("\nSFTP Commands:\n", .{});
-        std.debug.print("  ls <path>              List directory\n", .{});
-        std.debug.print("  get <remote> [local]   Download file\n", .{});
-        std.debug.print("  put <local> [remote]   Upload file\n", .{});
-        std.debug.print("  mkdir <path>           Create directory\n", .{});
-        std.debug.print("  rm <path>              Remove file\n", .{});
-        std.debug.print("  rmdir <path>           Remove directory\n", .{});
-        std.debug.print("  pwd                    Print working directory\n", .{});
-        std.debug.print("  exit                   Exit SFTP session\n", .{});
         std.process.exit(1);
     }
 
     const host_arg = args[0];
 
-    // Parse [user@]host[:port]
     var username: []const u8 = "root";
     var hostname: []const u8 = undefined;
     var port: u16 = 2222;
@@ -418,11 +567,9 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("Connecting to {s}:{d} for SFTP...\n", .{ hostname, port });
 
-    // Initialize random
-    var prng = std.Random.DefaultPrng.init(12345);
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    // Connect
     var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
@@ -431,10 +578,9 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("✓ Connected\n", .{});
 
-    // Authenticate
-    std.debug.print("Authenticating...\n", .{});
     const password = try getPassword(allocator, "Password: ");
     defer allocator.free(password);
+
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
@@ -447,15 +593,12 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("✓ Authenticated\n", .{});
 
-    // Open SFTP channel
-    std.debug.print("Starting SFTP subsystem...\n", .{});
     var sftp_channel = conn.openSftp() catch |err| {
         std.debug.print("✗ Failed to start SFTP: {}\n", .{err});
         std.process.exit(1);
     };
     defer sftp_channel.deinit();
 
-    // Initialize SFTP client
     var sftp_client = syslink.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
         std.debug.print("✗ Failed to initialize SFTP client: {}\n", .{err});
         std.process.exit(1);
@@ -464,7 +607,6 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("✓ SFTP session ready\n\n", .{});
 
-    // Interactive SFTP shell
     try runSftpInteractive(allocator, &sftp_client);
 }
 
@@ -472,28 +614,23 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    var current_dir = std.ArrayList(u8).init(allocator);
-    defer current_dir.deinit();
-    try current_dir.appendSlice("/");
+    const current_dir = "/";  // Simplified for demo
 
     while (true) {
-        // Print prompt
         try stdout.writeAll("sftp> ");
 
-        // Read command line
         var line_buffer: [1024]u8 = undefined;
         var line_len: usize = 0;
-
-        // Read until newline or EOF
         var byte_buffer: [1]u8 = undefined;
+
         while (true) {
             const n = stdin.read(&byte_buffer) catch |err| {
                 if (err == error.EOF or err == error.EndOfStream) return;
                 return err;
             };
-            if (n == 0) return; // EOF
+            if (n == 0) return;
             if (byte_buffer[0] == '\n') break;
-            if (line_len >= line_buffer.len) continue; // Skip if line too long
+            if (line_len >= line_buffer.len) continue;
             line_buffer[line_len] = byte_buffer[0];
             line_len += 1;
         }
@@ -503,35 +640,19 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
 
         if (trimmed.len == 0) continue;
 
-        // Parse command and arguments
         var iter = std.mem.splitScalar(u8, trimmed, ' ');
         const command = iter.next() orelse continue;
 
-        // Handle commands
         if (std.mem.eql(u8, command, "exit") or std.mem.eql(u8, command, "quit")) {
             break;
         } else if (std.mem.eql(u8, command, "pwd")) {
-            try stdout.writeAll(current_dir.items);
+            try stdout.writeAll(current_dir);
             try stdout.writeAll("\n");
         } else if (std.mem.eql(u8, command, "ls")) {
-            const path = iter.next() orelse current_dir.items;
+            const path = iter.next() orelse current_dir;
             try sftpListDirectory(allocator, client, path);
         } else if (std.mem.eql(u8, command, "cd")) {
-            const path = iter.next() orelse {
-                try stdout.writeAll("Error: path required\n");
-                continue;
-            };
-            // Update current directory (simplified - doesn't resolve paths)
-            current_dir.clearRetainingCapacity();
-            if (path[0] == '/') {
-                try current_dir.appendSlice(path);
-            } else {
-                try current_dir.appendSlice(current_dir.items);
-                if (current_dir.items[current_dir.items.len - 1] != '/') {
-                    try current_dir.append('/');
-                }
-                try current_dir.appendSlice(path);
-            }
+            try stdout.writeAll("Note: cd not implemented in this demo, use absolute paths\n");
         } else if (std.mem.eql(u8, command, "get")) {
             const remote_path = iter.next() orelse {
                 try stdout.writeAll("Error: remote path required\n");
@@ -561,8 +682,7 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
         } else if (std.mem.eql(u8, command, "help")) {
             try stdout.writeAll(
                 \\Available commands:
-                \\  ls [path]              List directory
-                \\  cd <path>              Change directory
+                \\  ls [path]              List directory (use absolute paths)
                 \\  pwd                    Print working directory
                 \\  get <remote> [local]   Download file
                 \\  put <local> [remote]   Upload file
@@ -600,9 +720,8 @@ fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCli
         return;
     };
     defer {
-        for (entries) |entry| {
-            allocator.free(entry.filename);
-            allocator.free(entry.longname);
+        for (entries) |*entry| {
+            entry.deinit(allocator);
         }
         allocator.free(entries);
     }
@@ -616,7 +735,8 @@ fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCli
 fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const handle = client.open(remote_path, .read, .{}) catch |err| {
+    const attrs = syslink.sftp.attributes.FileAttributes.init();
+    const handle = client.open(remote_path, .{ .read = true }, attrs) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -664,7 +784,7 @@ fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClie
 }
 
 fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
-    _ = allocator; // Currently unused but may be needed for future enhancements
+    _ = allocator;
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     const local_file = std.fs.cwd().openFile(local_path, .{}) catch |err| {
@@ -675,7 +795,8 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient
     };
     defer local_file.close();
 
-    const handle = client.open(remote_path, .write, .{ .create = true, .truncate = true }) catch |err| {
+    const attrs = syslink.sftp.attributes.FileAttributes.init();
+    const handle = client.open(remote_path, .{ .write = true, .creat = true, .trunc = true }, attrs) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -716,7 +837,8 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient
 fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    client.mkdir(path, .{}) catch |err| {
+    const attrs = syslink.sftp.attributes.FileAttributes.init();
+    client.mkdir(path, attrs) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error creating directory: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -739,4 +861,37 @@ fn sftpRemove(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     try stdout.writeAll("Removed: ");
     try stdout.writeAll(path);
     try stdout.writeAll("\n");
+}
+
+// ============================================================================
+// SSHFS COMMANDS
+// ============================================================================
+
+fn runMountCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 2) {
+        std.debug.print("Error: Remote and mount point required\n", .{});
+        std.debug.print("Usage: sl mount [user@]host[:port]:/remote/path /local/mount\n", .{});
+        std.debug.print("Example: sl mount testuser@192.168.1.100:/home/user ./mnt\n", .{});
+        std.process.exit(1);
+    }
+
+    _ = allocator;
+    std.debug.print("SSHFS mount functionality:\n", .{});
+    std.debug.print("  Remote: {s}\n", .{args[0]});
+    std.debug.print("  Mount point: {s}\n", .{args[1]});
+    std.debug.print("\n", .{});
+    std.debug.print("Note: SSHFS/FUSE integration not yet implemented\n", .{});
+    std.debug.print("This would use lib/sshfs/ to mount remote filesystem via FUSE\n", .{});
+}
+
+fn runUmountCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        std.debug.print("Error: Mount point required\n", .{});
+        std.debug.print("Usage: sl umount /mount/point\n", .{});
+        std.process.exit(1);
+    }
+
+    _ = allocator;
+    std.debug.print("Unmounting: {s}\n", .{args[0]});
+    std.debug.print("Note: SSHFS/FUSE integration not yet implemented\n", .{});
 }

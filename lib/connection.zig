@@ -457,7 +457,7 @@ pub const ServerConnection = struct {
 
         // Receive authentication request on stream 0
         var request_buffer: [4096]u8 = undefined;
-        const request_len = try self.transport.receiveFromStream(0, &request_buffer) catch |err| {
+        const request_len = self.transport.receiveFromStream(0, &request_buffer) catch |err| {
             std.log.err("Failed to receive authentication request: {}", .{err});
             return err;
         };
@@ -539,7 +539,7 @@ pub const ConnectionListener = struct {
 
     /// Start listening for SSH/QUIC connections
     pub fn listen(allocator: Allocator, config: ServerConfig) !Self {
-        std.log.info("SSH/QUIC server listening on {}:{}", .{
+        std.log.info("SSH/QUIC server listening on {s}:{}", .{
             config.listen_address,
             config.listen_port,
         });
@@ -557,7 +557,7 @@ pub const ConnectionListener = struct {
             .config = config,
             .udp_transport = udp_transport,
             .running = true,
-            .active_connections = std.ArrayList(*ServerConnection).init(allocator),
+            .active_connections = std.ArrayList(*ServerConnection){},
         };
     }
 
@@ -661,7 +661,7 @@ pub const ConnectionListener = struct {
             .channel_manager = channel_manager,
         };
 
-        try self.active_connections.append(conn);
+        try self.active_connections.append(self.allocator, conn);
 
         std.log.info("Client connection established, {} total active connections", .{
             self.active_connections.items.len,
