@@ -99,7 +99,7 @@ pub const ClientKeyExchange = struct {
         reply_data: []const u8,
     ) !struct { client_secret: [32]u8, server_secret: [32]u8 } {
         // Decode SSH_QUIC_REPLY
-        const reply = try kex_reply.SshQuicReply.decode(self.allocator, reply_data);
+        var reply = try kex_reply.SshQuicReply.decode(self.allocator, reply_data);
         errdefer reply.deinit(self.allocator);
 
         // Check for error reply
@@ -215,7 +215,7 @@ pub const ServerKeyExchange = struct {
         host_private_key: *const [64]u8,
     ) !struct { reply_data: []u8, client_secret: [32]u8, server_secret: [32]u8 } {
         // Decode SSH_QUIC_INIT
-        const init_msg = try kex_init.SshQuicInit.decode(self.allocator, init_data);
+        var init_msg = try kex_init.SshQuicInit.decode(self.allocator, init_data);
         errdefer init_msg.deinit(self.allocator);
 
         // Validate init message

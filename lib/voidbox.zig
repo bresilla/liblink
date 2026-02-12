@@ -37,6 +37,8 @@ pub const auth = @import("auth/auth.zig");
 
 pub const sftp = @import("sftp/sftp.zig");
 
+pub const connection = @import("connection.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("protocol/integration_test.zig");

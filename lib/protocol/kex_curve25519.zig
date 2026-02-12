@@ -15,7 +15,11 @@ pub const ClientEphemeralKey = struct {
 
     /// Generate a new client ephemeral key pair
     pub fn generate(random: std.Random) ClientEphemeralKey {
-        return crypto.ecdh.KeyPair.generate(random);
+        const kp = crypto.ecdh.KeyPair.generate(random);
+        return ClientEphemeralKey{
+            .public_key = kp.public_key,
+            .private_key = kp.private_key,
+        };
     }
 
     /// Encode client-kex-alg-data for SSH_QUIC_INIT
@@ -68,7 +72,11 @@ pub const ServerEphemeralKey = struct {
 
     /// Generate a new server ephemeral key pair
     pub fn generate(random: std.Random) ServerEphemeralKey {
-        return crypto.ecdh.KeyPair.generate(random);
+        const kp = crypto.ecdh.KeyPair.generate(random);
+        return ServerEphemeralKey{
+            .public_key = kp.public_key,
+            .private_key = kp.private_key,
+        };
     }
 
     /// Encode server-kex-alg-data for SSH_QUIC_REPLY
@@ -201,7 +209,8 @@ pub fn calculateExchangeHash(
 
     // Calculate SHA-256 hash
     const hash = try allocator.alloc(u8, 32);
-    crypto.hash.sha256(hash_input, hash[0..32]);
+    const hash_result = crypto.hash.sha256(hash_input);
+    @memcpy(hash, &hash_result);
 
     return hash;
 }

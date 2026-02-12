@@ -119,6 +119,9 @@ pub const Reader = struct {
         return data;
     }
 
+    /// Alias for readShortString
+    pub const readShortStr = readShortString;
+
     /// Read mpint (multi-precision integer) as a signed big integer
     /// Returns the bytes representing the mpint in big-endian format
     /// Caller owns the returned slice
@@ -217,6 +220,9 @@ pub const Writer = struct {
         try self.writeByte(@intCast(data.len));
         try self.writeBytes(data);
     }
+
+    /// Alias for writeShortString
+    pub const writeShortStr = writeShortString;
 
     /// Write mpint (multi-precision integer) from bytes in big-endian format
     /// The input should be in two's complement representation
