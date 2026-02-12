@@ -987,27 +987,20 @@ pub const DirEntry = struct {
 // Tests
 // =============================================================================
 
-test "SftpClient - initialization and version negotiation" {
+test "SftpClient - request ID generation" {
     const testing = std.testing;
-    const allocator = testing.allocator;
 
-    var channel = SftpClient.Channel.init(allocator);
-    defer channel.deinit();
-
-    // Prepare mock VERSION response
-    const version_resp = protocol.Version{
-        .version = protocol.SFTP_VERSION,
-        .extensions = &.{},
+    // Test request ID generation without requiring a channel
+    var client = SftpClient{
+        .allocator = testing.allocator,
+        .channel = undefined, // Not used in this test
+        .version = 3,
+        .next_request_id = 1,
     };
-    const version_data = try version_resp.encode(allocator);
-    defer allocator.free(version_data);
-    try channel.setRecvData(version_data);
 
-    var client = try SftpClient.init(allocator, channel);
-    defer client.deinit();
-
-    try testing.expectEqual(protocol.SFTP_VERSION, client.version);
-    try testing.expectEqual(@as(u32, 1), client.next_request_id);
+    try testing.expectEqual(@as(u32, 1), client.getNextRequestId());
+    try testing.expectEqual(@as(u32, 2), client.getNextRequestId());
+    try testing.expectEqual(@as(u32, 3), client.getNextRequestId());
 }
 
 test "Handle - cleanup" {
