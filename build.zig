@@ -20,10 +20,6 @@ pub fn build(b: *std.Build) !void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Get dependencies
-    const zcrypto = b.dependency("zcrypto", .{
-        .target = target,
-        .optimize = optimize,
-    });
     const zquic = b.dependency("zquic", .{
         .target = target,
         .optimize = optimize,
@@ -35,7 +31,6 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    voidbox_module.addImport("zcrypto", zcrypto.module("zcrypto"));
     voidbox_module.addImport("zquic", zquic.module("zquic"));
 
     _ = b.addModule("voidbox", .{

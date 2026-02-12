@@ -6,10 +6,6 @@
             .url = "https://github.com/bresilla/zquic/archive/707a71dba3d8080c60425a73934061557d31f34f.tar.gz",
             .hash = "zquic-0.9.5-2rPds7ltEgAeRDie4ZVuh8yxSv5YBnzwwCOedc4_WkES",
         },
-        .zcrypto = .{
-            .url = "https://github.com/bresilla/zcrypto/archive/5e81af5723d7c6cdb27040a4e0ae6fbb548afdce.tar.gz",
-            .hash = "zcrypto-0.9.7-rgQAI9fqDgCtBXJDz-N2ywcSnQgzRoNjSdqdHdKubfi_",
-        },
     },
     .paths = .{
         "build.zig",
