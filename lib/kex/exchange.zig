@@ -15,6 +15,7 @@ pub const ClientKeyExchange = struct {
     random: std.Random,
     ephemeral_key: kex_curve25519.ClientEphemeralKey,
     init_message: ?kex_init.SshQuicInit,
+    init_message_encoded: ?[]u8, // Save original encoded bytes for exchange hash
     reply_message: ?kex_reply.SshQuicReply,
     shared_secret: ?[32]u8,
     exchange_hash: ?[]u8,
@@ -30,6 +31,7 @@ pub const ClientKeyExchange = struct {
             .random = random,
             .ephemeral_key = ephemeral_key,
             .init_message = null,
+            .init_message_encoded = null,
             .reply_message = null,
             .shared_secret = null,
             .exchange_hash = null,
@@ -39,6 +41,9 @@ pub const ClientKeyExchange = struct {
     pub fn deinit(self: *Self) void {
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
+        }
+        if (self.init_message_encoded) |encoded| {
+            self.allocator.free(encoded);
         }
         if (self.reply_message) |*msg| {
             msg.deinit(self.allocator);
@@ -85,8 +90,9 @@ pub const ClientKeyExchange = struct {
         // Encode the message
         const encoded = try init_msg.encode(self.allocator);
 
-        // Save for exchange hash calculation
+        // Save both the struct and the encoded bytes for exchange hash calculation
         self.init_message = try duplicateInit(&init_msg, self.allocator);
+        self.init_message_encoded = try self.allocator.dupe(u8, encoded);
 
         return encoded;
     }
@@ -126,9 +132,8 @@ pub const ClientKeyExchange = struct {
             &server_data.public_key,
         );
 
-        // Encode init content for hash calculation
-        const init_encoded = try self.init_message.?.encode(self.allocator);
-        defer self.allocator.free(init_encoded);
+        // Use the original encoded init message (don't re-encode!)
+        const init_encoded = self.init_message_encoded.?;
 
         // Encode reply content without kex data for hash calculation
         const reply_without_kex = try encodeReplyWithoutKex(&reply, self.allocator);
@@ -144,7 +149,12 @@ pub const ClientKeyExchange = struct {
             &shared_secret,
         );
 
-        // TODO: Verify server signature over exchange hash
+        // Verify server signature over exchange hash
+        try verifyServerSignature(
+            exchange_hash,
+            server_data.signature,
+            server_data.host_key,
+        );
 
         // Derive QUIC secrets
         const quic_secrets = try shared_secrets.deriveQuicSecrets(
@@ -258,10 +268,15 @@ pub const ServerKeyExchange = struct {
             &client_ephemeral.public_key,
         );
 
+        // Generate server connection ID (needed for exchange hash)
+        const server_conn_id = try generateConnectionId(self.random, self.allocator);
+        defer self.allocator.free(server_conn_id);
+
         // Encode reply content without kex data for hash calculation
         const reply_without_kex = try encodeReplyWithoutKexFromParams(
             self.allocator,
             &init_msg,
+            server_conn_id,
             quic_versions,
             quic_params,
         );
@@ -293,7 +308,7 @@ pub const ServerKeyExchange = struct {
         // Create SSH_QUIC_REPLY
         const reply = kex_reply.SshQuicReply{
             .client_connection_id = init_msg.client_connection_id,
-            .server_connection_id = "server-conn-id", // TODO: Generate properly
+            .server_connection_id = server_conn_id,
             .server_quic_versions = quic_versions,
             .server_quic_trnsp_params = quic_params,
             .server_sig_algs = constants.DEFAULT_SIG_ALGS,
@@ -337,6 +352,17 @@ pub const ServerKeyExchange = struct {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Generate cryptographically random connection ID
+///
+/// QUIC connection IDs must be 4-20 bytes. We use 8 bytes for good balance
+/// between uniqueness and overhead.
+fn generateConnectionId(random: std.Random, allocator: Allocator) ![]u8 {
+    const conn_id_len = 8; // 8 bytes = 64 bits of randomness
+    const conn_id = try allocator.alloc(u8, conn_id_len);
+    random.bytes(conn_id);
+    return conn_id;
+}
 
 /// Duplicate SSH_QUIC_INIT for storage
 fn duplicateInit(init: *const kex_init.SshQuicInit, allocator: Allocator) !kex_init.SshQuicInit {
@@ -427,12 +453,13 @@ fn encodeReplyWithoutKex(reply: *const kex_reply.SshQuicReply, allocator: Alloca
 fn encodeReplyWithoutKexFromParams(
     allocator: Allocator,
     init: *const kex_init.SshQuicInit,
+    server_connection_id: []const u8,
     quic_versions: []const u32,
     quic_params: []const u8,
 ) ![]u8 {
     const reply = kex_reply.SshQuicReply{
         .client_connection_id = init.client_connection_id,
-        .server_connection_id = "server-conn-id",
+        .server_connection_id = server_connection_id,
         .server_quic_versions = quic_versions,
         .server_quic_trnsp_params = quic_params,
         .server_sig_algs = constants.DEFAULT_SIG_ALGS,
@@ -446,23 +473,198 @@ fn encodeReplyWithoutKexFromParams(
 }
 
 /// Sign exchange hash with Ed25519
+/// Sign exchange hash with Ed25519 host key
+///
+/// Returns SSH signature blob format: string(algorithm) || string(signature)
 fn signExchangeHash(
     exchange_hash: []const u8,
     private_key: *const [64]u8,
     allocator: Allocator,
 ) ![]u8 {
-    _ = exchange_hash;
-    _ = private_key;
-    // TODO: Implement Ed25519 signature
-    // For now, return dummy signature
-    const signature = try allocator.alloc(u8, 64);
-    @memset(signature, 0xAB);
+    // Sign the exchange hash
+    const raw_signature = crypto.signature.sign(exchange_hash, private_key);
+
+    // Encode as SSH signature blob: string("ssh-ed25519") || string(signature)
+    const algorithm = "ssh-ed25519";
+    const blob_size = 4 + algorithm.len + 4 + raw_signature.len;
+    const signature_blob = try allocator.alloc(u8, blob_size);
+    errdefer allocator.free(signature_blob);
+
+    var offset: usize = 0;
+
+    // Write algorithm name
+    std.mem.writeInt(u32, signature_blob[offset..][0..4], @intCast(algorithm.len), .big);
+    offset += 4;
+    @memcpy(signature_blob[offset .. offset + algorithm.len], algorithm);
+    offset += algorithm.len;
+
+    // Write signature
+    std.mem.writeInt(u32, signature_blob[offset..][0..4], @intCast(raw_signature.len), .big);
+    offset += 4;
+    @memcpy(signature_blob[offset .. offset + raw_signature.len], &raw_signature);
+
+    return signature_blob;
+}
+
+/// Verify server signature over exchange hash
+///
+/// Validates the server's Ed25519 signature on the exchange hash using
+/// the server's host key.
+fn verifyServerSignature(
+    exchange_hash: []const u8,
+    signature_blob: []const u8,
+    host_key_blob: []const u8,
+) !void {
+    // Decode SSH signature blob: string(algorithm) || string(signature)
+    const raw_signature = try decodeSshSignatureBlob(signature_blob);
+
+    // Decode SSH host key blob: string(algorithm) || string(public_key)
+    const public_key = try decodeSshHostKeyBlob(host_key_blob);
+
+    // Verify signature
+    if (!crypto.signature.verifyEd25519(exchange_hash, &raw_signature, &public_key)) {
+        std.log.err("Server signature verification failed - hash_len={} sig_len={} pubkey_len={}", .{
+            exchange_hash.len,
+            raw_signature.len,
+            public_key.len,
+        });
+        return error.InvalidSignature;
+    }
+}
+
+/// Decode SSH signature blob
+///
+/// Format: string("ssh-ed25519") || string(64-byte signature)
+fn decodeSshSignatureBlob(blob: []const u8) ![64]u8 {
+    var offset: usize = 0;
+
+    // Read algorithm name
+    if (blob.len < 4) return error.InvalidSignatureBlob;
+    const alg_len = std.mem.readInt(u32, blob[offset..][0..4], .big);
+    offset += 4;
+
+    if (offset + alg_len > blob.len) return error.InvalidSignatureBlob;
+    const algorithm = blob[offset .. offset + alg_len];
+    offset += alg_len;
+
+    // Verify algorithm
+    if (!std.mem.eql(u8, algorithm, "ssh-ed25519")) {
+        std.log.err("Unsupported signature algorithm: {s}", .{algorithm});
+        return error.UnsupportedAlgorithm;
+    }
+
+    // Read signature
+    if (offset + 4 > blob.len) return error.InvalidSignatureBlob;
+    const sig_len = std.mem.readInt(u32, blob[offset..][0..4], .big);
+    offset += 4;
+
+    if (sig_len != 64) {
+        std.log.err("Invalid Ed25519 signature length: {}", .{sig_len});
+        return error.InvalidSignatureLength;
+    }
+
+    if (offset + sig_len > blob.len) return error.InvalidSignatureBlob;
+    var signature: [64]u8 = undefined;
+    @memcpy(&signature, blob[offset .. offset + 64]);
+
     return signature;
+}
+
+/// Decode SSH host key blob
+///
+/// Format: string("ssh-ed25519") || string(32-byte public key)
+fn decodeSshHostKeyBlob(blob: []const u8) ![32]u8 {
+    var offset: usize = 0;
+
+    // Read algorithm name
+    if (blob.len < 4) return error.InvalidHostKeyBlob;
+    const alg_len = std.mem.readInt(u32, blob[offset..][0..4], .big);
+    offset += 4;
+
+    if (offset + alg_len > blob.len) return error.InvalidHostKeyBlob;
+    const algorithm = blob[offset .. offset + alg_len];
+    offset += alg_len;
+
+    // Verify algorithm
+    if (!std.mem.eql(u8, algorithm, "ssh-ed25519")) {
+        std.log.err("Unsupported host key algorithm: {s}", .{algorithm});
+        return error.UnsupportedAlgorithm;
+    }
+
+    // Read public key
+    if (offset + 4 > blob.len) return error.InvalidHostKeyBlob;
+    const key_len = std.mem.readInt(u32, blob[offset..][0..4], .big);
+    offset += 4;
+
+    if (key_len != 32) {
+        std.log.err("Invalid Ed25519 public key length: {}", .{key_len});
+        return error.InvalidPublicKeyLength;
+    }
+
+    if (offset + key_len > blob.len) return error.InvalidHostKeyBlob;
+    var public_key: [32]u8 = undefined;
+    @memcpy(&public_key, blob[offset .. offset + 32]);
+
+    return public_key;
+}
+
+/// Encode Ed25519 public key as SSH host key blob
+///
+/// Format: string("ssh-ed25519") || string(32-byte public key)
+fn encodeSshHostKey(allocator: Allocator, public_key: *const [32]u8) ![]u8 {
+    const algorithm = "ssh-ed25519";
+    const blob_size = 4 + algorithm.len + 4 + public_key.len;
+    const host_key_blob = try allocator.alloc(u8, blob_size);
+    errdefer allocator.free(host_key_blob);
+
+    var offset: usize = 0;
+
+    // Write algorithm name
+    std.mem.writeInt(u32, host_key_blob[offset..][0..4], @intCast(algorithm.len), .big);
+    offset += 4;
+    @memcpy(host_key_blob[offset .. offset + algorithm.len], algorithm);
+    offset += algorithm.len;
+
+    // Write public key
+    std.mem.writeInt(u32, host_key_blob[offset..][0..4], @intCast(public_key.len), .big);
+    offset += 4;
+    @memcpy(host_key_blob[offset .. offset + public_key.len], public_key);
+
+    return host_key_blob;
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "Ed25519 signature round-trip" {
+    const testing = std.testing;
+
+    // Generate a valid Ed25519 keypair
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const ed_keypair = Ed25519.KeyPair.generate();
+
+    // Convert to our format
+    var private_key: [64]u8 = undefined;
+    @memcpy(&private_key, &ed_keypair.secret_key.bytes);
+
+    var public_key: [32]u8 = undefined;
+    @memcpy(&public_key, &ed_keypair.public_key.bytes);
+
+    // Test data
+    const test_data = "Hello, Ed25519!";
+
+    // Sign
+    const signature = crypto.signature.sign(test_data, &private_key);
+
+    // Verify
+    const valid = crypto.signature.verifyEd25519(test_data, &signature, &public_key);
+    try testing.expect(valid);
+
+    // Verify with wrong data should fail
+    const wrong_valid = crypto.signature.verifyEd25519("Wrong data", &signature, &public_key);
+    try testing.expect(!wrong_valid);
+}
 
 test "ClientKeyExchange - create init" {
     const testing = std.testing;
@@ -501,9 +703,21 @@ test "Full key exchange - client and server" {
     var server = ServerKeyExchange.init(allocator, random);
     defer server.deinit();
 
-    const host_key = "ssh-ed25519 AAAA...";
+    // Generate a valid Ed25519 keypair
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const ed_keypair = Ed25519.KeyPair.generate();
+
+    // Convert to our format - Ed25519 secret key includes public key in bytes[32..64]
     var host_private_key: [64]u8 = undefined;
-    random.bytes(&host_private_key);
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+
+    // The public key should match what's in secret_key.bytes[32..64]
+    var host_public_key: [32]u8 = undefined;
+    @memcpy(&host_public_key, &ed_keypair.public_key.bytes);
+
+    // Encode host key as SSH blob: string("ssh-ed25519") || string(public_key)
+    const host_key = try encodeSshHostKey(allocator, &host_public_key);
+    defer allocator.free(host_key);
 
     const server_result = try server.processInitAndCreateReply(
         init_data,

@@ -63,35 +63,56 @@ pub fn main() !void {
     std.debug.print("Waiting for client connections...\n", .{});
     std.debug.print("(Press Ctrl+C to stop)\n\n", .{});
 
+    // Setup graceful shutdown (Ctrl+C handler would go here in production)
+    // For demo purposes, we'll just show the pattern
+
     // Accept client connections in a loop
     var client_count: usize = 0;
-    while (true) {
+    while (listener.running) {
         client_count += 1;
 
         std.debug.print("--- Client #{d} ---\n", .{client_count});
+        std.debug.print("Active connections: {}\n", .{listener.getActiveConnectionCount()});
 
-        // Accept connection
-        var server_conn = listener.acceptConnection() catch |err| {
+        // Accept connection (returns pointer to tracked connection)
+        const server_conn = listener.acceptConnection() catch |err| {
+            if (err == error.ServerShutdown) {
+                std.debug.print("Server shutting down, no longer accepting connections\n", .{});
+                break;
+            }
             std.debug.print("✗ Failed to accept connection: {}\n\n", .{err});
             continue;
         };
-        defer server_conn.deinit();
 
         std.debug.print("✓ Client connected\n", .{});
         std.debug.print("  • UDP key exchange: ✓\n", .{});
         std.debug.print("  • QUIC handshake: ✓\n\n", .{});
 
-        // Handle this client
-        handleClient(allocator, &server_conn) catch |err| {
+        // In production, spawn a thread/task to handle this client concurrently:
+        // const thread = try std.Thread.spawn(.{}, handleClient, .{allocator, server_conn, &listener});
+        // thread.detach();
+        //
+        // For demo, handle synchronously:
+        handleClient(allocator, server_conn, &listener) catch |err| {
             std.debug.print("✗ Client handler error: {}\n\n", .{err});
+            // Connection will be cleaned up by removeConnection
             continue;
         };
 
         std.debug.print("✓ Client session completed\n\n", .{});
     }
+
+    std.debug.print("\nServer stopped. Active connections: {}\n", .{listener.getActiveConnectionCount()});
+    std.debug.print("Cleaning up remaining connections...\n", .{});
 }
 
-fn handleClient(allocator: std.mem.Allocator, connection: *syslink.connection.ServerConnection) !void {
+fn handleClient(
+    allocator: std.mem.Allocator,
+    connection: *syslink.connection.ServerConnection,
+    listener: *syslink.connection.ConnectionListener,
+) !void {
+    // Ensure connection is cleaned up when this function returns
+    defer listener.removeConnection(connection);
     // === Authentication ===
     std.debug.print("Waiting for authentication...\n", .{});
 
@@ -216,14 +237,11 @@ fn handleSubsystemRequest(stream_id: u64, subsystem_name: []const u8) !void {
 
     if (std.mem.eql(u8, subsystem_name, "sftp")) {
         std.debug.print("  ✓ SFTP subsystem handler called\n", .{});
-        std.debug.print("  Note: SFTP server not implemented in demo\n", .{});
-
-        // In production:
-        // 1. Initialize SFTP protocol handler
-        // 2. Send SSH_FXP_VERSION response
-        // 3. Enter SFTP request loop
-        // 4. Handle file operations
-        // 5. Send responses
+        std.debug.print("  Note: SFTP server can be started here\n", .{});
+        std.debug.print("  Example:\n", .{});
+        std.debug.print("    var sftp_server = try syslink.sftp.SftpServer.init(allocator, sftp_channel);\n", .{});
+        std.debug.print("    defer sftp_server.deinit();\n", .{});
+        std.debug.print("    try sftp_server.run(); // Process SFTP requests\n", .{});
     } else {
         std.debug.print("  ✗ Unknown subsystem: {s}\n", .{subsystem_name});
         return error.UnsupportedSubsystem;

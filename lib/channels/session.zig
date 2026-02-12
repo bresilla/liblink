@@ -357,3 +357,244 @@ pub const SessionServer = struct {
         try self.manager.closeChannel(stream_id);
     }
 };
+
+// ============================================================================
+// Reference Handler Implementations
+// ============================================================================
+
+/// Reference shell handler - spawns a pseudo-terminal
+///
+/// This is a basic implementation that spawns /bin/sh with a PTY.
+/// Production servers should customize this based on user preferences.
+pub fn defaultShellHandler(stream_id: u64) !void {
+    std.log.info("Spawning shell for stream {}", .{stream_id});
+
+    // In a real implementation, this would:
+    // 1. Fork a new process
+    // 2. Create a pseudo-terminal (PTY) pair
+    // 3. Set up the PTY as the child's stdio
+    // 4. Exec the user's shell (from /etc/passwd or $SHELL)
+    // 5. Bridge PTY master <-> SSH channel data
+    //
+    // For now, this is a stub that logs the action
+    std.log.warn("Shell spawning not yet implemented - PTY support requires platform-specific code", .{});
+}
+
+/// Reference exec handler - executes a command
+///
+/// Runs a single command and returns output on the channel.
+pub fn defaultExecHandler(stream_id: u64, command: []const u8) !void {
+    std.log.info("Executing command on stream {}: {s}", .{ stream_id, command });
+
+    // In a real implementation, this would:
+    // 1. Fork a new process
+    // 2. Set up pipes for stdin/stdout/stderr
+    // 3. Exec the command via shell: /bin/sh -c "command"
+    // 4. Bridge pipes <-> SSH channel data
+    // 5. Send exit status when command completes
+    //
+    // For now, this is a stub that logs the action
+    std.log.warn("Command execution not yet implemented - requires process spawning", .{});
+}
+
+/// Reference subsystem handler - dispatches to subsystem implementations
+///
+/// Routes subsystem requests to appropriate handlers (e.g., SFTP).
+pub fn defaultSubsystemHandler(stream_id: u64, subsystem_name: []const u8) !void {
+    std.log.info("Starting subsystem '{s}' on stream {}", .{ subsystem_name, stream_id });
+
+    if (std.mem.eql(u8, subsystem_name, "sftp")) {
+        // In a real implementation, this would:
+        // 1. Initialize SFTP server for this channel
+        // 2. Enter SFTP request/response loop
+        // 3. Process file operations (open, read, write, etc.)
+        //
+        // For now, log that SFTP would be started
+        std.log.info("SFTP subsystem would be started here", .{});
+    } else {
+        std.log.err("Unknown subsystem: {s}", .{subsystem_name});
+        return error.UnknownSubsystem;
+    }
+}
+
+// ============================================================================
+// Platform-specific PTY Support (Linux)
+// ============================================================================
+
+/// PTY (Pseudo-Terminal) management for shell sessions
+///
+/// This would handle creating PTY pairs and bridging them to SSH channels.
+/// Platform-specific implementation required (posix_openpt, grantpt, etc.)
+pub const PtyManager = struct {
+    master_fd: std.posix.fd_t,
+    slave_fd: std.posix.fd_t,
+    allocator: Allocator,
+
+    const Self = @This();
+
+    /// Create a new PTY pair
+    ///
+    /// Note: This is a placeholder. Real implementation would use:
+    /// - Linux: posix_openpt(), grantpt(), unlockpt(), ptsname()
+    /// - BSD: openpty()
+    pub fn create(allocator: Allocator) !Self {
+        _ = allocator;
+        std.log.warn("PTY creation not implemented - platform-specific code required", .{});
+        return error.NotImplemented;
+    }
+
+    pub fn deinit(self: *Self) void {
+        // Close FDs
+        std.posix.close(self.master_fd);
+        std.posix.close(self.slave_fd);
+    }
+
+    /// Set terminal window size
+    pub fn setWindowSize(self: *Self, rows: u32, cols: u32) !void {
+        _ = self;
+        _ = rows;
+        _ = cols;
+        return error.NotImplemented;
+    }
+
+    /// Read data from PTY master
+    pub fn read(self: *Self, buffer: []u8) !usize {
+        return std.posix.read(self.master_fd, buffer);
+    }
+
+    /// Write data to PTY master
+    pub fn write(self: *Self, data: []const u8) !usize {
+        return std.posix.write(self.master_fd, data);
+    }
+};
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "SessionServer - init" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Create mock channel manager
+    var manager = ChannelManager.init(allocator, undefined, true);
+    defer manager.deinit();
+
+    // Initialize session server
+    const session_server = SessionServer.init(allocator, &manager);
+
+    // Verify it's initialized correctly
+    try testing.expect(session_server.allocator.ptr == allocator.ptr);
+}
+
+test "SessionServer - handler callbacks" {
+    const testing = std.testing;
+
+    // Test shell handler callback signature
+    const shell_handler: SessionServer.ShellHandler = defaultShellHandler;
+    _ = shell_handler;
+
+    // Test exec handler callback signature
+    const exec_handler: SessionServer.ExecHandler = defaultExecHandler;
+    _ = exec_handler;
+
+    // Test subsystem handler callback signature
+    const subsystem_handler: SessionServer.SubsystemHandler = defaultSubsystemHandler;
+    _ = subsystem_handler;
+
+    // If we get here, the callback types are compatible
+    try testing.expect(true);
+}
+
+test "Default handlers - shell" {
+    const testing = std.testing;
+
+    // Test that shell handler can be called
+    // It won't actually spawn a shell (not implemented), but should not crash
+    try defaultShellHandler(123);
+
+    try testing.expect(true);
+}
+
+test "Default handlers - exec" {
+    const testing = std.testing;
+
+    // Test that exec handler can be called with a command
+    try defaultExecHandler(123, "ls -la");
+
+    try testing.expect(true);
+}
+
+test "Default handlers - subsystem sftp" {
+    const testing = std.testing;
+
+    // Test that subsystem handler recognizes SFTP
+    try defaultSubsystemHandler(123, "sftp");
+
+    try testing.expect(true);
+}
+
+test "Default handlers - subsystem unknown" {
+    const testing = std.testing;
+
+    // Test that unknown subsystem returns error
+    const result = defaultSubsystemHandler(123, "unknown-subsystem");
+    try testing.expectError(error.UnknownSubsystem, result);
+}
+
+test "encodePtyRequest - format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const modes = try allocator.alloc(u8, 1);
+    defer allocator.free(modes);
+    modes[0] = 0; // TTY_OP_END
+
+    const pty_data = try encodePtyRequest(
+        allocator,
+        "xterm-256color",
+        80, // width_chars
+        24, // height_rows
+        640, // width_pixels
+        480, // height_pixels
+        modes,
+    );
+    defer allocator.free(pty_data);
+
+    // Verify the data has content
+    try testing.expect(pty_data.len > 0);
+
+    // Verify it starts with the terminal string length
+    const term_len = std.mem.readInt(u32, pty_data[0..4], .big);
+    try testing.expectEqual(@as(u32, "xterm-256color".len), term_len);
+}
+
+test "encodeExecRequest - format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const exec_data = try encodeExecRequest(allocator, "echo hello");
+    defer allocator.free(exec_data);
+
+    // Verify format: string(command)
+    const cmd_len = std.mem.readInt(u32, exec_data[0..4], .big);
+    try testing.expectEqual(@as(u32, "echo hello".len), cmd_len);
+
+    const command = exec_data[4..];
+    try testing.expectEqualStrings("echo hello", command);
+}
+
+test "encodeSubsystemRequest - format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const subsys_data = try encodeSubsystemRequest(allocator, "sftp");
+    defer allocator.free(subsys_data);
+
+    // Verify format: string(subsystem_name)
+    const name_len = std.mem.readInt(u32, subsys_data[0..4], .big);
+    try testing.expectEqual(@as(u32, "sftp".len), name_len);
+
+    const subsys_name = subsys_data[4..];
+    try testing.expectEqualStrings("sftp", subsys_name);
+}

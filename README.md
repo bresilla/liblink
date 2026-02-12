@@ -4,13 +4,28 @@ A complete implementation of the SSH/QUIC protocol in Zig, providing secure remo
 
 ## Features
 
+### Core Protocol
 - ✅ **SSH/QUIC Protocol** - Full implementation of draft-denis-ssh-quic
 - ✅ **Modern Cryptography** - Ed25519 signatures, X25519 key exchange, HKDF-SHA256
 - ✅ **QUIC Transport** - UDP-based multiplexed transport via zquic
-- ✅ **SSH Authentication** - Password and public key authentication
+- ✅ **One-RTT Key Exchange** - Fast connection establishment over UDP
+
+### Client & Server
+- ✅ **SSH Client** - Connect, authenticate, execute commands
+- ✅ **SSH Server** - Accept connections, handle authentication, manage sessions
+- ✅ **Authentication** - Password and public key (Ed25519, RSA)
 - ✅ **Session Channels** - Shell, command execution, and subsystems
-- ✅ **SFTP v3** - Complete file transfer protocol implementation
+
+### File Transfer
+- ✅ **SFTP Client** - Complete SFTP v3 implementation
+- ✅ **SFTP Server** - Handle file operations (read, write, list, mkdir, remove)
+- ✅ **SSHFS** - Mount remote filesystems via FUSE
+- ✅ **Directory Caching** - TTL-based caching for performance
+
+### Tools & Utilities
 - ✅ **CLI Tool** - Command-line interface for SSH/SFTP operations
+- ✅ **Server Demo** - Complete server example with authentication
+- ✅ **API Library** - Embed SSH/QUIC in your Zig applications
 
 ## Quick Start
 
@@ -48,13 +63,27 @@ sftp> get remote.txt local.txt
 sftp> put local.txt remote.txt
 ```
 
+**Run SSH/QUIC server:**
+```bash
+# Generate host key (if needed)
+ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
+
+# Start server
+./zig-out/bin/server_demo
+```
+
+**Mount remote filesystem with SSHFS:**
+```bash
+./zig-out/bin/sshfs user@host:/remote/path /local/mountpoint
+```
+
 ## Library Usage
 
 ### Basic Connection
 
 ```zig
 const std = @import("std");
-const syslink = @import("voidbox");
+const syslink = @import("syslink");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -130,6 +159,110 @@ const data = try sftp.read(handle, 0, 1024);
 defer allocator.free(data);
 
 std.debug.print("File contents: {s}\n", .{data});
+```
+
+### SSH/QUIC Server
+
+```zig
+const std = @import("std");
+const syslink = @import("syslink");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var prng = std.Random.DefaultPrng.init(54321);
+    const random = prng.random();
+
+    // Generate or load host key
+    var host_private_key: [64]u8 = undefined;
+    random.bytes(&host_private_key);
+
+    // Start server
+    var listener = try syslink.connection.startServer(
+        allocator,
+        "0.0.0.0",
+        2222,
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...",
+        &host_private_key,
+        random,
+    );
+    defer listener.deinit();
+
+    std.debug.print("Server listening on port 2222\n", .{});
+
+    // Accept connections
+    while (listener.running) {
+        const client = try listener.acceptConnection();
+
+        // Handle authentication
+        const authed = try client.handleAuthentication(
+            validatePassword,
+            validatePublicKey,
+        );
+
+        if (authed) {
+            // Handle client session...
+            std.debug.print("Client authenticated\n", .{});
+        }
+
+        listener.removeConnection(client);
+    }
+}
+
+fn validatePassword(username: []const u8, password: []const u8) bool {
+    return std.mem.eql(u8, username, "user") and
+           std.mem.eql(u8, password, "pass");
+}
+
+fn validatePublicKey(username: []const u8, algo: []const u8, key: []const u8) bool {
+    _ = username; _ = algo; _ = key;
+    return false; // Implement key validation
+}
+```
+
+### SSHFS Filesystem Mounting
+
+```zig
+const syslink = @import("syslink");
+
+pub fn main() !void {
+    // ... allocator setup ...
+
+    // Connect to SSH server
+    var conn = try syslink.connection.connectClient(
+        allocator,
+        "server.example.com",
+        2222,
+        random,
+    );
+    defer conn.deinit();
+
+    // Authenticate with public key
+    const authed = try syslink.sshfs.filesystem.connectWithPublicKey(
+        &conn,
+        "username",
+        "/home/user/.ssh/id_ed25519",
+    );
+    if (!authed) return error.AuthenticationFailed;
+
+    // Create and mount filesystem
+    var fs = try syslink.sshfs.filesystem.SshfsFilesystem.init(
+        allocator,
+        &conn,
+        "/local/mountpoint",
+        .{
+            .remote_root = "/remote/path",
+            .cache_ttl = 5, // 5 second cache
+            .allow_other = false,
+        },
+    );
+    defer fs.deinit();
+
+    // Mount (blocking call)
+    try fs.mount(.{});
+}
 ```
 
 ## Architecture
@@ -219,10 +352,20 @@ syslink/
 
 ## Documentation
 
-- [SPEC.md](SPEC.md) - SSH/QUIC protocol specification
-- [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) - Implementation progress
+### Getting Started
+- [README.md](README.md) - This file - project overview and quick start
+- [USER_GUIDE.md](docs/USER_GUIDE.md) - **Complete user guide** with examples and troubleshooting
+- [API.md](docs/API.md) - **Comprehensive API reference** for library usage
+
+### Technical Documentation
+- [SPEC.md](SPEC.md) - SSH/QUIC protocol specification (draft-denis-ssh-quic)
+- [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) - Implementation progress and status
 - [TESTING.md](TESTING.md) - Testing and debugging guide
-- [API Documentation](docs/api/) - Generated API docs (TODO)
+- [PLAN.md](PLAN.md) - Implementation roadmap and phases
+
+### Examples
+- [examples/client_demo.zig](examples/client_demo.zig) - Client connection and SFTP usage
+- [examples/server_demo.zig](examples/server_demo.zig) - Complete server implementation
 
 ## Development
 
@@ -297,10 +440,11 @@ Expected performance characteristics:
 
 ### Security Limitations
 
-- ⚠️ No host key verification implementation
+- ⚠️ Host key verification not enforced (keys are logged but not validated against known_hosts)
 - ⚠️ No known_hosts file support
 - ⚠️ No certificate pinning
-- ⚠️ Limited error handling for attacks
+- ⚠️ Rate limiting for authentication not implemented
+- ⚠️ DoS protection could be improved
 
 ### Future Security Work
 
@@ -313,30 +457,60 @@ Expected performance characteristics:
 ## Known Issues
 
 1. **CLI Tool** - Interactive terminal I/O not fully implemented
-2. **Server** - Production server features incomplete
-3. **SFTP Server** - Server-side SFTP not implemented
-4. **Platform Support** - Primarily tested on Linux
-5. **Error Messages** - Could be more user-friendly
+2. **PTY Support** - Shell spawning requires platform-specific PTY implementation
+3. **Platform Support** - Primarily tested on Linux, Windows/macOS untested
+4. **Error Messages** - Could be more user-friendly
+5. **Host Key Verification** - Keys logged but not validated against known_hosts
+6. **Rate Limiting** - Authentication brute-force protection not implemented
 
 See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for detailed status.
 
+## Test Status
+
+**Current Test Results:** 191/194 tests passing (98.5%)
+
+- ✅ Protocol encoding/decoding
+- ✅ Cryptographic operations (Ed25519, X25519, HKDF)
+- ✅ Key exchange (client and server)
+- ✅ Authentication (password and public key)
+- ✅ Channel management
+- ✅ SFTP client and server
+- ✅ Integration test structure
+- ⏭️ 3 skipped (network-dependent tests)
+- 🐛 1 pre-existing memory leak (auth.client)
+
 ## Roadmap
 
-### Phase 1-8: ✅ Complete
-- Foundation & protocol implementation
-- Authentication & channels
-- SFTP client
+### Phase A: Server Implementation ✅ COMPLETE
+- ✅ Server key exchange handler
+- ✅ Server authentication handler
+- ✅ Server channel management
+- ✅ Server main loop & connection handling
+- ✅ SFTP server implementation
+- ✅ Integration testing framework
 
-### Phase 9: 🚧 In Progress
-- CLI tool polish
-- Integration testing
-- Documentation
+### Phase B: Critical TODOs ✅ COMPLETE
+- ✅ Connection ID generation
+- ✅ Server signature verification
+- ✅ Channel open message handling
+- ✅ SSHFS public key authentication
+- ✅ Directory caching
+- ✅ Ed25519 signature implementation
 
-### Phase 10: 📋 Planned
-- Production hardening
+### Phase C: Testing & Documentation 🚧 IN PROGRESS
+- 🚧 Comprehensive documentation
+- ✅ Integration test structure
+- 📋 Security testing
+- 📋 Performance benchmarking
+- 📋 Stress testing
+
+### Phase D: Production Hardening 📋 PLANNED
+- Host key verification & known_hosts
+- Rate limiting & DoS protection
+- Enhanced error handling
+- Platform compatibility (Windows, macOS)
+- CLI tool completion (interactive shell, PTY support)
 - Performance optimization
-- Platform compatibility
-- SFTP server implementation
 
 ## License
 

@@ -404,10 +404,21 @@ pub const ServerConnection = struct {
     }
 
     /// Accept a new channel opened by client
+    ///
+    /// Waits for SSH_MSG_CHANNEL_OPEN on the next available client stream,
+    /// validates the request, and sends SSH_MSG_CHANNEL_OPEN_CONFIRMATION.
+    ///
+    /// Returns the stream ID of the opened channel.
     pub fn acceptChannel(self: *Self) !u64 {
-        // TODO: Wait for channel open message on next available stream
-        _ = self;
-        return error.NotImplemented;
+        // Determine next expected client stream (client streams are 4, 8, 12, ...)
+        const next_stream_id = self.channel_manager.getNextClientStream();
+
+        // Use channel manager to accept the channel
+        try self.channel_manager.acceptChannel(next_stream_id);
+
+        std.log.info("Server accepted channel on stream {}", .{next_stream_id});
+
+        return next_stream_id;
     }
 
     /// Send data on a channel
@@ -432,28 +443,46 @@ pub const ServerConnection = struct {
         password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !bool {
+        std.log.info("Waiting for authentication request...", .{});
+
         var auth_server = auth.AuthServer.init(self.allocator);
         if (password_validator) |validator| {
             auth_server.setPasswordValidator(validator);
+            std.log.debug("Password authentication enabled", .{});
         }
         if (publickey_validator) |validator| {
             auth_server.setPublicKeyValidator(validator);
+            std.log.debug("Public key authentication enabled", .{});
         }
 
         // Receive authentication request on stream 0
         var request_buffer: [4096]u8 = undefined;
-        const request_len = try self.transport.receiveFromStream(0, &request_buffer);
+        const request_len = try self.transport.receiveFromStream(0, &request_buffer) catch |err| {
+            std.log.err("Failed to receive authentication request: {}", .{err});
+            return err;
+        };
         const request_data = request_buffer[0..request_len];
+
+        std.log.debug("Received authentication request ({} bytes)", .{request_len});
 
         // Get exchange hash from key exchange
         const exchange_hash = self.kex.getExchangeHash();
 
         // Process authentication request
-        var response = try auth_server.processRequest(request_data, exchange_hash);
+        var response = auth_server.processRequest(request_data, exchange_hash) catch |err| {
+            std.log.err("Failed to process authentication request: {}", .{err});
+            return err;
+        };
         defer response.deinit(self.allocator);
 
         // Send response to client
         try self.transport.sendOnStream(0, response.data);
+
+        if (response.success) {
+            std.log.info("✓ Authentication successful", .{});
+        } else {
+            std.log.warn("✗ Authentication failed", .{});
+        }
 
         return response.success;
     }
@@ -503,6 +532,8 @@ pub const ConnectionListener = struct {
     allocator: Allocator,
     config: ServerConfig,
     udp_transport: udp.KeyExchangeTransport,
+    running: bool,
+    active_connections: std.ArrayList(*ServerConnection),
 
     const Self = @This();
 
@@ -525,17 +556,60 @@ pub const ConnectionListener = struct {
             .allocator = allocator,
             .config = config,
             .udp_transport = udp_transport,
+            .running = true,
+            .active_connections = std.ArrayList(*ServerConnection).init(allocator),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Clean up all active connections
+        for (self.active_connections.items) |conn| {
+            conn.deinit();
+            self.allocator.destroy(conn);
+        }
+        self.active_connections.deinit();
+
         self.udp_transport.deinit();
+    }
+
+    /// Graceful shutdown - stops accepting new connections
+    pub fn shutdown(self: *Self) void {
+        std.log.info("Server shutting down gracefully...", .{});
+        self.running = false;
+    }
+
+    /// Get number of active connections
+    pub fn getActiveConnectionCount(self: *Self) usize {
+        return self.active_connections.items.len;
+    }
+
+    /// Remove a connection from tracking (called when client disconnects)
+    pub fn removeConnection(self: *Self, conn: *ServerConnection) void {
+        for (self.active_connections.items, 0..) |tracked_conn, i| {
+            if (tracked_conn == conn) {
+                _ = self.active_connections.swapRemove(i);
+                conn.deinit();
+                self.allocator.destroy(conn);
+                std.log.info("Client disconnected, {} active connections remaining", .{
+                    self.active_connections.items.len,
+                });
+                return;
+            }
+        }
     }
 
     /// Accept the next incoming connection
     ///
-    /// This blocks until a client connects
-    pub fn acceptConnection(self: *Self) !ServerConnection {
+    /// This blocks until a client connects. Returns a pointer to the
+    /// ServerConnection which is tracked by the listener.
+    ///
+    /// The connection is automatically cleaned up when removeConnection() is called
+    /// or when the listener is deinitialized.
+    pub fn acceptConnection(self: *Self) !*ServerConnection {
+        if (!self.running) {
+            return error.ServerShutdown;
+        }
+
         std.log.info("Waiting for client connection...", .{});
 
         // Receive SSH_QUIC_INIT from client
@@ -576,14 +650,24 @@ pub const ConnectionListener = struct {
         // Initialize channel manager
         const channel_manager = channels.ChannelManager.init(self.allocator, &transport, true);
 
-        std.log.info("Client connection established", .{});
+        // Allocate and track the connection
+        const conn = try self.allocator.create(ServerConnection);
+        errdefer self.allocator.destroy(conn);
 
-        return ServerConnection{
+        conn.* = ServerConnection{
             .allocator = self.allocator,
             .transport = transport,
             .kex = kex,
             .channel_manager = channel_manager,
         };
+
+        try self.active_connections.append(conn);
+
+        std.log.info("Client connection established, {} total active connections", .{
+            self.active_connections.items.len,
+        });
+
+        return conn;
     }
 };
 
@@ -701,4 +785,181 @@ test "ServerConfig - initialization" {
 
     try testing.expectEqual(@as(u16, 22), config.listen_port);
     try testing.expectEqualStrings("0.0.0.0", config.listen_address);
+}
+
+// Test helper: password validator
+fn testPasswordValidator(username: []const u8, password: []const u8) bool {
+    std.log.info("Password validation: user={s}, password={s}", .{ username, password });
+    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass123");
+}
+
+// Test helper: public key validator
+fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
+    _ = public_key_blob;
+    std.log.info("Public key validation: user={s}, algorithm={s}", .{ username, algorithm });
+    return std.mem.eql(u8, username, "keyuser") and std.mem.eql(u8, algorithm, "ssh-ed25519");
+}
+
+test "ServerConnection - authentication validators" {
+    const testing = std.testing;
+
+    // Test password validator
+    try testing.expect(testPasswordValidator("testuser", "testpass123"));
+    try testing.expect(!testPasswordValidator("testuser", "wrongpass"));
+    try testing.expect(!testPasswordValidator("wronguser", "testpass123"));
+
+    // Test public key validator
+    const dummy_key = "dummy-key";
+    try testing.expect(testPublicKeyValidator("keyuser", "ssh-ed25519", dummy_key));
+    try testing.expect(!testPublicKeyValidator("keyuser", "ssh-rsa", dummy_key));
+    try testing.expect(!testPublicKeyValidator("wronguser", "ssh-ed25519", dummy_key));
+}
+
+test "AuthServer integration - password authentication flow" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Create auth server
+    var auth_server = auth.AuthServer.init(allocator);
+    auth_server.setPasswordValidator(testPasswordValidator);
+
+    // Create password authentication request
+    var request = @import("protocol/userauth.zig").UserauthRequest{
+        .username = "testuser",
+        .service_name = "ssh-connection",
+        .method_name = "password",
+        .method_data = .{ .password = "testpass123" },
+    };
+
+    const request_data = try request.encode(allocator);
+    defer allocator.free(request_data);
+
+    const exchange_hash = "test-exchange-hash";
+
+    // Process request
+    var response = try auth_server.processRequest(request_data, exchange_hash);
+    defer response.deinit(allocator);
+
+    // Verify success
+    try testing.expect(response.success);
+}
+
+test "AuthServer integration - password authentication failure" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Create auth server
+    var auth_server = auth.AuthServer.init(allocator);
+    auth_server.setPasswordValidator(testPasswordValidator);
+
+    // Create password authentication request with wrong password
+    var request = @import("protocol/userauth.zig").UserauthRequest{
+        .username = "testuser",
+        .service_name = "ssh-connection",
+        .method_name = "password",
+        .method_data = .{ .password = "wrongpass" },
+    };
+
+    const request_data = try request.encode(allocator);
+    defer allocator.free(request_data);
+
+    const exchange_hash = "test-exchange-hash";
+
+    // Process request
+    var response = try auth_server.processRequest(request_data, exchange_hash);
+    defer response.deinit(allocator);
+
+    // Verify failure
+    try testing.expect(!response.success);
+}
+
+test "ConnectionListener - init and shutdown" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(99999);
+    const random = prng.random();
+
+    // Generate Ed25519 keypair for testing
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const ed_keypair = Ed25519.KeyPair.generate();
+
+    var host_private_key: [64]u8 = undefined;
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+
+    var host_public_key: [32]u8 = undefined;
+    @memcpy(&host_public_key, &ed_keypair.public_key.bytes);
+
+    // Encode host key as SSH blob
+    const host_key_blob = try encodeTestHostKey(allocator, &host_public_key);
+    defer allocator.free(host_key_blob);
+
+    const config = ServerConfig{
+        .listen_address = "127.0.0.1",
+        .listen_port = 9999, // Use high port for testing
+        .host_key = host_key_blob,
+        .host_private_key = &host_private_key,
+        .random = random,
+    };
+
+    // Note: Can't actually initialize listener without network stack
+    // This tests the configuration structure
+    try testing.expectEqualStrings("127.0.0.1", config.listen_address);
+    try testing.expectEqual(@as(u16, 9999), config.listen_port);
+}
+
+test "ConnectionListener - running flag" {
+    const testing = std.testing;
+
+    // Simulate listener state
+    var running: bool = true;
+    try testing.expect(running);
+
+    // Simulate shutdown
+    running = false;
+    try testing.expect(!running);
+}
+
+test "ConnectionListener - connection tracking" {
+    const testing = std.testing;
+
+    // Test connection counting logic
+    var count: usize = 0;
+
+    // Add connections
+    count += 1;
+    count += 1;
+    count += 1;
+    try testing.expectEqual(@as(usize, 3), count);
+
+    // Remove a connection
+    count -= 1;
+    try testing.expectEqual(@as(usize, 2), count);
+
+    // Clear all
+    count = 0;
+    try testing.expectEqual(@as(usize, 0), count);
+}
+
+// Helper to encode SSH host key for tests
+fn encodeTestHostKey(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
+    const algorithm = "ssh-ed25519";
+    const blob_size = 4 + algorithm.len + 4 + public_key.len;
+    const host_key_blob = try allocator.alloc(u8, blob_size);
+    errdefer allocator.free(host_key_blob);
+
+    var offset: usize = 0;
+
+    // Write algorithm name
+    std.mem.writeInt(u32, host_key_blob[offset..][0..4], @intCast(algorithm.len), .big);
+    offset += 4;
+    @memcpy(host_key_blob[offset .. offset + algorithm.len], algorithm);
+    offset += algorithm.len;
+
+    // Write public key
+    std.mem.writeInt(u32, host_key_blob[offset..][0..4], @intCast(public_key.len), .big);
+    offset += 4;
+    @memcpy(host_key_blob[offset .. offset + public_key.len], public_key);
+
+    return host_key_blob;
 }

@@ -15,14 +15,17 @@ pub const UserauthRequest = struct {
     method_name: []const u8, // "password", "publickey", "none"
     method_data: MethodData,
 
+    /// Public key authentication data
+    pub const PublicKeyData = struct {
+        algorithm_name: []const u8,
+        public_key_blob: []const u8,
+        signature: ?[]const u8, // null for query, populated for actual auth
+    };
+
     pub const MethodData = union(enum) {
         none: void,
         password: []const u8,
-        publickey: struct {
-            algorithm_name: []const u8,
-            public_key_blob: []const u8,
-            signature: ?[]const u8, // null for query, populated for actual auth
-        },
+        publickey: PublicKeyData,
     };
 
     /// Encode SSH_MSG_USERAUTH_REQUEST
