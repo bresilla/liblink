@@ -17,48 +17,8 @@ pub const SftpClient = struct {
     version: u32,
     next_request_id: u32,
 
-    /// Mock SSH channel for testing
-    /// In production, this would be replaced with actual channel implementation
-    pub const Channel = struct {
-        recv_data: ?[]u8,
-        allocator: Allocator,
-
-        pub fn init(allocator: Allocator) Channel {
-            return .{
-                .allocator = allocator,
-                .recv_data = null,
-            };
-        }
-
-        pub fn deinit(self: *Channel) void {
-            // Mock channel - memory managed externally in tests
-            // Ownership is transferred in receive(), so nothing to free here
-            _ = self;
-        }
-
-        pub fn send(self: *Channel, data: []const u8) !void {
-            // In mock implementation, just discard sent data
-            _ = self;
-            _ = data;
-        }
-
-        pub fn receive(self: *Channel, allocator: Allocator) ![]u8 {
-            _ = allocator;
-            if (self.recv_data) |data| {
-                // Transfer ownership to caller
-                self.recv_data = null;
-                return data;
-            }
-            return error.NoData;
-        }
-
-        pub fn setRecvData(self: *Channel, data: []const u8) !void {
-            if (self.recv_data) |old_data| {
-                self.allocator.free(old_data);
-            }
-            self.recv_data = try self.allocator.dupe(u8, data);
-        }
-    };
+    /// SSH channel for SFTP communication
+    pub const Channel = @import("channel_adapter.zig").SftpChannel;
 
     /// Initialize SFTP client and perform version negotiation
     pub fn init(allocator: Allocator, channel: Channel) !SftpClient {

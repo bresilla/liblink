@@ -57,15 +57,16 @@ pub const SshFilesystem = struct {
         const mount_point_copy = try allocator.dupe(u8, mount_point);
         errdefer allocator.free(mount_point_copy);
 
-        // Initialize SFTP client
-        var sftp_client = try sftp.client.SftpClient.init(allocator);
+        // Open SFTP channel and initialize client
+        const sftp_channel = try conn.openSftp();
+        const sftp_client = try sftp.client.SftpClient.init(allocator, sftp_channel);
         errdefer sftp_client.deinit();
 
         // Initialize caching layers
-        var inode_cache = InodeCache.init(allocator);
-        var handle_manager = HandleManager.init(allocator);
-        var dir_cache = DirCache.init(allocator, opts.cache_ttl);
-        var attr_cache = AttrCache.init(allocator, opts.cache_ttl);
+        const inode_cache = InodeCache.init(allocator);
+        const handle_manager = HandleManager.init(allocator);
+        const dir_cache = DirCache.init(allocator, opts.cache_ttl);
+        const attr_cache = AttrCache.init(allocator, opts.cache_ttl);
 
         var self = Self{
             .allocator = allocator,
@@ -108,30 +109,30 @@ pub const SshFilesystem = struct {
     /// Mount the filesystem
     pub fn mount(self: *Self, opts: Options) !void {
         // Build FUSE arguments
-        var args = std.ArrayList([]const u8).init(self.allocator);
-        defer args.deinit();
+        var args = std.ArrayListUnmanaged([]const u8){};
+        defer args.deinit(self.allocator);
 
         // Program name
-        try args.append("sshfs");
+        try args.append(self.allocator, "sshfs");
 
         // Mount point
-        try args.append(self.mount_point);
+        try args.append(self.allocator, self.mount_point);
 
         // FUSE options
-        try args.append("-f"); // Foreground
+        try args.append(self.allocator, "-f"); // Foreground
 
         if (opts.debug) {
-            try args.append("-d"); // Debug
+            try args.append(self.allocator, "-d"); // Debug
         }
 
         if (opts.allow_other) {
-            try args.append("-o");
-            try args.append("allow_other");
+            try args.append(self.allocator, "-o");
+            try args.append(self.allocator, "allow_other");
         }
 
         if (opts.allow_root) {
-            try args.append("-o");
-            try args.append("allow_root");
+            try args.append(self.allocator, "-o");
+            try args.append(self.allocator, "allow_root");
         }
 
         // Convert to C-style argv
@@ -225,7 +226,7 @@ pub fn mount(
     opts: SshFilesystem.Options,
 ) !void {
     // Create SSH connection
-    var random = std.crypto.random;
+    const random = std.crypto.random;
     var conn = try connection.connectClient(
         allocator,
         hostname,
@@ -251,48 +252,8 @@ pub fn mount(
     try fs.mount(opts);
 }
 
-/// Mount with public key authentication
-pub fn mountWithKey(
-    allocator: std.mem.Allocator,
-    hostname: []const u8,
-    port: u16,
-    username: []const u8,
-    private_key_path: []const u8,
-    remote_path: []const u8,
-    mount_point: []const u8,
-    opts: SshFilesystem.Options,
-) !void {
-    // Create SSH connection
-    var random = std.crypto.random;
-    var conn = try connection.connectClient(
-        allocator,
-        hostname,
-        port,
-        random,
-    );
-    defer conn.deinit();
-
-    // Load private key
-    const key_data = try std.fs.cwd().readFileAlloc(
-        allocator,
-        private_key_path,
-        1024 * 1024, // 1MB max
-    );
-    defer allocator.free(key_data);
-
-    // Authenticate with public key
-    const auth_success = try conn.authenticatePublicKey(username, key_data);
-    if (!auth_success) {
-        return error.AuthenticationFailed;
-    }
-
-    // Create filesystem
-    var fs_opts = opts;
-    fs_opts.remote_root = remote_path;
-
-    var fs = try SshFilesystem.init(allocator, &conn, mount_point, fs_opts);
-    defer fs.deinit();
-
-    // Mount
-    try fs.mount(opts);
-}
+// TODO: Implement public key authentication
+// Need to parse SSH key file format and call authenticatePublicKey with:
+// - algorithm_name (e.g. "ssh-ed25519")
+// - public_key_blob
+// - private_key (64 bytes for Ed25519)

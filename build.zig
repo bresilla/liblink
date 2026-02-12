@@ -114,6 +114,31 @@ pub fn build(b: *std.Build) !void {
     const sl_step = b.step("sl", "Compile sl CLI binary");
     sl_step.dependOn(&sl.step);
 
+    // SSHFS executable
+    const sshfs_module = b.createModule(.{
+        .root_source_file = b.path("bin/sshfs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    sshfs_module.addImport("voidbox", voidbox_module);
+
+    const sshfs = b.addExecutable(.{
+        .name = "sshfs",
+        .root_module = sshfs_module,
+    });
+
+    // Link FUSE3 library
+    sshfs.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+    sshfs.addIncludePath(.{ .cwd_relative = "/usr/include/fuse3" });
+    sshfs.linkSystemLibrary("fuse3");
+    sshfs.linkLibC();
+
+    b.installArtifact(sshfs);
+
+    const sshfs_step = b.step("sshfs", "Compile sshfs CLI binary");
+    sshfs_step.dependOn(&sshfs.step);
+
     const examples_step = b.step("examples", "Compile embedder examples");
     examples_step.dependOn(&ex_shell.step);
     examples_step.dependOn(&ex_events.step);

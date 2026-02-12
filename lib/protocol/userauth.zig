@@ -213,24 +213,24 @@ pub const UserauthFailure = struct {
         defer allocator.free(name_list);
 
         // Parse comma-separated list
-        var methods = std.ArrayList([]const u8).init(allocator);
+        var methods = std.ArrayListUnmanaged([]const u8){};
         errdefer {
             for (methods.items) |method| {
                 allocator.free(method);
             }
-            methods.deinit();
+            methods.deinit(allocator);
         }
 
         var iter = std.mem.splitScalar(u8, name_list, ',');
         while (iter.next()) |method| {
             const method_copy = try allocator.dupe(u8, method);
-            try methods.append(method_copy);
+            try methods.append(allocator, method_copy);
         }
 
         const partial_success = try reader.readBool();
 
         return UserauthFailure{
-            .authentications_continue = try methods.toOwnedSlice(),
+            .authentications_continue = try methods.toOwnedSlice(allocator),
             .partial_success = partial_success,
         };
     }

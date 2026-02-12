@@ -137,7 +137,8 @@ pub const DirCache = struct {
     fn invalidateLocked(self: *Self, path: []const u8) void {
         if (self.cache.fetchRemove(path)) |kv| {
             self.allocator.free(kv.key);
-            kv.value.deinit();
+            var val = kv.value;
+            val.deinit();
         }
     }
 

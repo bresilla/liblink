@@ -95,7 +95,7 @@ pub const ChannelManager = struct {
 
         try self.transport.sendOnStream(stream_id, encoded);
 
-        std.log.info("Opened channel type='{}' on stream {}", .{ std.zig.fmtEscapes(channel_type), stream_id });
+        std.log.info("Opened channel type='{s}' on stream {}", .{ channel_type, stream_id });
 
         return stream_id;
     }
@@ -112,8 +112,8 @@ pub const ChannelManager = struct {
         var open_msg = try channel_protocol.ChannelOpen.decode(self.allocator, data);
         defer open_msg.deinit(self.allocator);
 
-        std.log.info("Received CHANNEL_OPEN type='{}' on stream {}", .{
-            std.zig.fmtEscapes(open_msg.channel_type),
+        std.log.info("Received CHANNEL_OPEN type='{s}' on stream {}", .{
+            open_msg.channel_type,
             stream_id,
         });
 
@@ -193,8 +193,8 @@ pub const ChannelManager = struct {
 
         try self.transport.sendOnStream(stream_id, encoded);
 
-        std.log.info("Sent CHANNEL_REQUEST type='{}' on stream {}", .{
-            std.zig.fmtEscapes(request_type),
+        std.log.info("Sent CHANNEL_REQUEST type='{s}' on stream {}", .{
+            request_type,
             stream_id,
         });
     }
@@ -250,7 +250,7 @@ pub const ChannelManager = struct {
         const data_msg = try channel_protocol.ChannelData.decode(self.allocator, raw_data);
         // Don't defer deinit - caller owns the data
 
-        return data_msg.data;
+        return @constCast(data_msg.data);
     }
 
     /// Send EOF on channel

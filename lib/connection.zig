@@ -73,7 +73,7 @@ pub const ClientConnection = struct {
     ///
     /// Returns ready-to-use connection
     pub fn connect(allocator: Allocator, config: ConnectionConfig) !Self {
-        std.log.info("Connecting to {}:{}...", .{ config.server_address, config.server_port });
+        std.log.info("Connecting to {s}:{}...", .{ config.server_address, config.server_port });
 
         // Initialize UDP transport for key exchange
         var udp_transport = try udp.KeyExchangeTransport.initClient(

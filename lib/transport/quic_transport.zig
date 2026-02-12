@@ -97,11 +97,10 @@ pub const QuicTransport = struct {
         else
             .client_bidirectional;
 
-        stream.* = zquic.core.Stream.SuperStream.init(
+        stream.* = try zquic.core.Stream.SuperStream.init(
             self.allocator,
             stream_id,
             stream_type,
-            self.connection.params.initial_max_stream_data_bidi_local,
         );
 
         // Add to connection's stream map
@@ -116,7 +115,7 @@ pub const QuicTransport = struct {
     /// Close a stream
     pub fn closeStream(self: *Self, stream_id: u64) !void {
         if (self.connection.streams.get(stream_id)) |stream| {
-            stream.state = .closed;
+            stream.state.store(.closed, .release);
             // Note: Actual stream cleanup happens in connection.deinit()
         } else {
             return error.StreamNotFound;
@@ -128,7 +127,7 @@ pub const QuicTransport = struct {
         const stream = self.connection.streams.get(stream_id) orelse return error.StreamNotFound;
 
         // Write data to stream buffer
-        try stream.writeData(data, false);
+        _ = try stream.write(data, false);
 
         // Update connection stats
         self.connection.stats.bytes_sent += data.len;
@@ -139,7 +138,7 @@ pub const QuicTransport = struct {
         const stream = self.connection.streams.get(stream_id) orelse return error.StreamNotFound;
 
         // Read data from stream buffer
-        const bytes_read = try stream.readData(buffer);
+        const bytes_read = try stream.read(buffer);
 
         // Update connection stats
         self.connection.stats.bytes_received += bytes_read;
@@ -152,10 +151,10 @@ pub const QuicTransport = struct {
         const stream = self.connection.streams.get(stream_id) orelse return error.StreamNotFound;
 
         // Mark stream as half-closed local
-        stream.state = .half_closed_local;
+        stream.state.store(.half_closed_local, .release);
 
         // Write empty data with FIN flag
-        try stream.writeData(&[_]u8{}, true);
+        _ = try stream.write(&[_]u8{}, true);
     }
 };
 

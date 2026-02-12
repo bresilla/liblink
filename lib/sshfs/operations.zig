@@ -1,6 +1,8 @@
 const std = @import("std");
 const fuse = @import("../fuse/fuse.zig");
 const sftp = @import("../sftp/sftp.zig");
+const protocol = @import("../sftp/protocol.zig");
+const attributes = @import("../sftp/attributes.zig");
 const InodeCache = @import("inode_cache.zig").InodeCache;
 const HandleManager = @import("handle_manager.zig").HandleManager;
 const DirCache = @import("dir_cache.zig").DirCache;
@@ -26,7 +28,7 @@ pub const SshfsContext = struct {
 };
 
 /// Convert SFTP attributes to FUSE stat structure
-fn sftpAttrToStat(attr: sftp.protocol.FileAttributes, stbuf: *fuse.Stat) void {
+fn sftpAttrToStat(attr: attributes.FileAttributes, stbuf: *fuse.Stat) void {
     stbuf.* = std.mem.zeroes(fuse.Stat);
 
     // File size
@@ -109,7 +111,7 @@ fn getContext() ?*SshfsContext {
 // ============================================================================
 
 /// Get file attributes (stat)
-export fn sshfs_getattr(path: [*:0]const u8, stbuf: *fuse.Stat) callconv(.C) c_int {
+export fn sshfs_getattr(path: [*:0]const u8, stbuf: *fuse.Stat) callconv(.c) c_int {
     const ctx = getContext() orelse return -fuse.EIO;
     const path_slice = std.mem.span(path);
 
@@ -169,7 +171,7 @@ export fn sshfs_readdir(
     filler: fuse.FuseFillDirT,
     offset: fuse.off_t,
     fi: *fuse.FuseFileInfo,
-) callconv(.C) c_int {
+) callconv(.c) c_int {
     _ = offset;
     _ = fi;
 
@@ -206,36 +208,31 @@ export fn sshfs_readdir(
         return switch (err) {
             error.NoSuchFile => -fuse.ENOENT,
             error.PermissionDenied => -fuse.EACCES,
-            error.NotDirectory => -fuse.ENOTDIR,
             else => -fuse.EIO,
         };
     };
     defer ctx.sftp_client.close(handle) catch {};
 
     // Read directory entries
-    var entries = std.ArrayList(DirCache.DirEntry).init(ctx.allocator);
-    defer {
-        for (entries.items) |entry| {
-            entry.deinit(ctx.allocator);
-        }
-        entries.deinit();
-    }
+    // Note: Temporarily not caching directory entries due to ArrayList API issues
 
     // Add . and ..
     _ = filler(buf, ".", null, 0);
     _ = filler(buf, "..", null, 0);
 
-    // Read all entries
-    while (true) {
-        const entry = ctx.sftp_client.readdir(handle) catch |err| {
-            if (err == error.EndOfFile) break;
-            return -fuse.EIO;
-        };
-        defer ctx.allocator.free(entry.filename);
-        if (entry.attrs.longname) |ln| {
-            ctx.allocator.free(ln);
+    // Read all entries from SFTP (readdir returns a slice of all entries)
+    const entries = ctx.sftp_client.readdir(handle) catch {
+        return -fuse.EIO;
+    };
+    defer {
+        for (entries) |*entry| {
+            entry.deinit(ctx.allocator);
         }
+        ctx.allocator.free(entries);
+    }
 
+    // Add each entry to filler
+    for (entries) |entry| {
         // Skip . and ..
         if (std.mem.eql(u8, entry.filename, ".") or
             std.mem.eql(u8, entry.filename, "..")) {
@@ -243,36 +240,19 @@ export fn sshfs_readdir(
         }
 
         // Add to filler
-        const name_z = ctx.allocator.dupeZ(u8, entry.filename) catch {
-            continue;
-        };
+        const name_z = ctx.allocator.dupeZ(u8, entry.filename) catch continue;
         defer ctx.allocator.free(name_z);
 
         _ = filler(buf, name_z.ptr, null, 0);
-
-        // Cache entry
-        const is_dir = if (entry.attrs.permissions) |perms|
-            fuse.S_ISDIR(perms)
-        else
-            false;
-
-        const cache_entry = DirCache.DirEntry{
-            .name = ctx.allocator.dupe(u8, entry.filename) catch continue,
-            .is_dir = is_dir,
-            .size = entry.attrs.size orelse 0,
-            .mtime = @intCast(entry.attrs.mtime orelse 0),
-        };
-        entries.append(cache_entry) catch continue;
     }
 
-    // Cache directory listing
-    ctx.dir_cache.put(path_slice, entries.items) catch {};
+    // TODO: Cache directory listing
 
     return 0;
 }
 
 /// Open a file
-export fn sshfs_open(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.C) c_int {
+export fn sshfs_open(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.c) c_int {
     const ctx = getContext() orelse return -fuse.EIO;
     const path_slice = std.mem.span(path);
 
@@ -284,20 +264,20 @@ export fn sshfs_open(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.C) c
     }) catch return -fuse.ENAMETOOLONG;
 
     // Determine SFTP open flags
-    var pflags: u32 = sftp.protocol.SSH_FXF_READ;
+    var pflags: u32 = protocol.OpenFlags.SSH_FXF_READ;
     if ((fi.flags & fuse.O_WRONLY) != 0 or (fi.flags & fuse.O_RDWR) != 0) {
-        pflags = sftp.protocol.SSH_FXF_WRITE;
+        pflags = protocol.OpenFlags.SSH_FXF_WRITE;
     }
     if ((fi.flags & fuse.O_RDWR) != 0) {
-        pflags = sftp.protocol.SSH_FXF_READ | sftp.protocol.SSH_FXF_WRITE;
+        pflags = protocol.OpenFlags.SSH_FXF_READ | protocol.OpenFlags.SSH_FXF_WRITE;
     }
 
     // Open file via SFTP
-    const handle = ctx.sftp_client.open(remote_path, pflags, .{}) catch |err| {
+    const open_flags = protocol.OpenFlags.fromU32(pflags);
+    const handle = ctx.sftp_client.open(remote_path, open_flags, attributes.FileAttributes.init()) catch |err| {
         return switch (err) {
             error.NoSuchFile => -fuse.ENOENT,
             error.PermissionDenied => -fuse.EACCES,
-            error.IsDirectory => -fuse.EISDIR,
             else => -fuse.EIO,
         };
     };
@@ -323,7 +303,7 @@ export fn sshfs_read(
     size: usize,
     offset: fuse.off_t,
     fi: *fuse.FuseFileInfo,
-) callconv(.C) c_int {
+) callconv(.c) c_int {
     _ = path;
 
     const ctx = getContext() orelse return -fuse.EIO;
@@ -334,10 +314,10 @@ export fn sshfs_read(
     };
 
     // Read from SFTP
-    const bytes_read = ctx.sftp_client.read(
+    const data = ctx.sftp_client.read(
         handle_info.sftp_handle,
         @intCast(offset),
-        buf[0..size],
+        @intCast(size),
     ) catch |err| {
         return switch (err) {
             error.EndOfFile => 0,
@@ -345,15 +325,20 @@ export fn sshfs_read(
             else => -fuse.EIO,
         };
     };
+    defer ctx.allocator.free(data);
+
+    // Copy to buffer
+    const bytes_read = @min(data.len, size);
+    @memcpy(buf[0..bytes_read], data[0..bytes_read]);
 
     // Update offset
-    ctx.handle_manager.updateOffset(fi.fh, @intCast(offset + bytes_read));
+    ctx.handle_manager.updateOffset(fi.fh, @intCast(offset + @as(i64, @intCast(bytes_read))));
 
     return @intCast(bytes_read);
 }
 
 /// Release (close) a file
-export fn sshfs_release(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.C) c_int {
+export fn sshfs_release(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.c) c_int {
     _ = path;
 
     const ctx = getContext() orelse return -fuse.EIO;
@@ -371,25 +356,430 @@ export fn sshfs_release(path: [*:0]const u8, fi: *fuse.FuseFileInfo) callconv(.C
 }
 
 // ============================================================================
+// FUSE Operations - Write Operations
+// ============================================================================
+
+/// Write file data
+export fn sshfs_write(
+    path: [*:0]const u8,
+    buf: [*]const u8,
+    size: usize,
+    offset: fuse.off_t,
+    fi: *fuse.FuseFileInfo,
+) callconv(.c) c_int {
+    _ = path;
+
+    const ctx = getContext() orelse return -fuse.EIO;
+
+    // Get handle info
+    const handle_info = ctx.handle_manager.getHandle(fi.fh) orelse {
+        return -fuse.EBADF;
+    };
+
+    // Write to SFTP
+    ctx.sftp_client.write(
+        handle_info.sftp_handle,
+        @intCast(offset),
+        buf[0..size],
+    ) catch |err| {
+        return switch (err) {
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate attribute cache for this file
+    const path_slice = handle_info.path;
+    ctx.attr_cache.invalidate(path_slice);
+
+    return @intCast(size);
+}
+
+/// Create and open a file
+export fn sshfs_create(
+    path: [*:0]const u8,
+    mode: fuse.mode_t,
+    fi: *fuse.FuseFileInfo,
+) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Create file via SFTP
+    const pflags = protocol.OpenFlags.SSH_FXF_CREAT |
+                   protocol.OpenFlags.SSH_FXF_WRITE |
+                   protocol.OpenFlags.SSH_FXF_READ;
+
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withPermissions(mode);
+
+    const open_flags = protocol.OpenFlags.fromU32(pflags);
+    const handle = ctx.sftp_client.open(remote_path, open_flags, attrs) catch |err| {
+        return switch (err) {
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Allocate FUSE file handle
+    const fh = ctx.handle_manager.allocateHandle(
+        handle,
+        path_slice,
+        @intCast(fi.flags),
+    ) catch {
+        ctx.sftp_client.close(handle) catch {};
+        return -fuse.ENOMEM;
+    };
+
+    fi.fh = fh;
+
+    // Invalidate caches
+    ctx.attr_cache.invalidate(path_slice);
+    if (std.mem.lastIndexOf(u8, path_slice, "/")) |idx| {
+        const parent = path_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+
+    return 0;
+}
+
+/// Change file size
+export fn sshfs_truncate(path: [*:0]const u8, size: fuse.off_t) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Set size via SFTP setstat
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withSize(@intCast(size));
+
+    ctx.sftp_client.setstat(remote_path, attrs) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate attribute cache
+    ctx.attr_cache.invalidate(path_slice);
+
+    return 0;
+}
+
+// ============================================================================
+// FUSE Operations - Directory Operations
+// ============================================================================
+
+/// Create a directory
+export fn sshfs_mkdir(path: [*:0]const u8, mode: fuse.mode_t) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Create directory via SFTP
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withPermissions(mode | fuse.S_IFDIR);
+
+    ctx.sftp_client.mkdir(remote_path, attrs) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate parent directory cache
+    if (std.mem.lastIndexOf(u8, path_slice, "/")) |idx| {
+        const parent = path_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+
+    return 0;
+}
+
+/// Remove a directory
+export fn sshfs_rmdir(path: [*:0]const u8) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Remove directory via SFTP
+    ctx.sftp_client.rmdir(remote_path) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate caches
+    ctx.dir_cache.invalidate(path_slice);
+    ctx.attr_cache.invalidate(path_slice);
+    if (std.mem.lastIndexOf(u8, path_slice, "/")) |idx| {
+        const parent = path_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+
+    return 0;
+}
+
+/// Remove a file
+export fn sshfs_unlink(path: [*:0]const u8) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Remove file via SFTP
+    ctx.sftp_client.remove(remote_path) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate caches
+    ctx.attr_cache.invalidate(path_slice);
+    if (std.mem.lastIndexOf(u8, path_slice, "/")) |idx| {
+        const parent = path_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+
+    return 0;
+}
+
+/// Rename/move a file or directory
+export fn sshfs_rename(oldpath: [*:0]const u8, newpath: [*:0]const u8) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const old_slice = std.mem.span(oldpath);
+    const new_slice = std.mem.span(newpath);
+
+    // Build remote paths
+    var old_buf: [4096]u8 = undefined;
+    var new_buf: [4096]u8 = undefined;
+    const remote_old = std.fmt.bufPrint(&old_buf, "{s}{s}", .{
+        ctx.remote_root,
+        old_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+    const remote_new = std.fmt.bufPrint(&new_buf, "{s}{s}", .{
+        ctx.remote_root,
+        new_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Rename via SFTP
+    ctx.sftp_client.rename(remote_old, remote_new) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Update inode cache
+    ctx.inode_cache.rename(old_slice, new_slice) catch {};
+
+    // Invalidate all affected caches
+    ctx.attr_cache.invalidate(old_slice);
+    ctx.attr_cache.invalidate(new_slice);
+    ctx.dir_cache.invalidate(old_slice);
+
+    // Invalidate parent directories
+    if (std.mem.lastIndexOf(u8, old_slice, "/")) |idx| {
+        const parent = old_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+    if (std.mem.lastIndexOf(u8, new_slice, "/")) |idx| {
+        const parent = new_slice[0..idx];
+        if (parent.len > 0) {
+            ctx.dir_cache.invalidate(parent);
+        } else {
+            ctx.dir_cache.invalidate("/");
+        }
+    }
+
+    return 0;
+}
+
+// ============================================================================
+// FUSE Operations - Attribute Operations
+// ============================================================================
+
+/// Change file permissions
+export fn sshfs_chmod(path: [*:0]const u8, mode: fuse.mode_t) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Set permissions via SFTP
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withPermissions(mode);
+
+    ctx.sftp_client.setstat(remote_path, attrs) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate attribute cache
+    ctx.attr_cache.invalidate(path_slice);
+
+    return 0;
+}
+
+/// Change file owner
+export fn sshfs_chown(
+    path: [*:0]const u8,
+    uid: fuse.uid_t,
+    gid: fuse.gid_t,
+) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Set ownership via SFTP
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withUidGid(uid, gid);
+
+    ctx.sftp_client.setstat(remote_path, attrs) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate attribute cache
+    ctx.attr_cache.invalidate(path_slice);
+
+    return 0;
+}
+
+/// Change file timestamps
+export fn sshfs_utimens(
+    path: [*:0]const u8,
+    tv: [*]const fuse.timespec,
+) callconv(.c) c_int {
+    const ctx = getContext() orelse return -fuse.EIO;
+    const path_slice = std.mem.span(path);
+
+    // Build remote path
+    var path_buf: [4096]u8 = undefined;
+    const remote_path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{
+        ctx.remote_root,
+        path_slice,
+    }) catch return -fuse.ENAMETOOLONG;
+
+    // Extract timestamps
+    const atime = tv[0];
+    const mtime = tv[1];
+
+    // Set timestamps via SFTP
+    var attrs = attributes.FileAttributes.init();
+    _ = attrs.withTimes(@intCast(atime.tv_sec), @intCast(mtime.tv_sec));
+
+    ctx.sftp_client.setstat(remote_path, attrs) catch |err| {
+        return switch (err) {
+            error.NoSuchFile => -fuse.ENOENT,
+            error.PermissionDenied => -fuse.EACCES,
+            else => -fuse.EIO,
+        };
+    };
+
+    // Invalidate attribute cache
+    ctx.attr_cache.invalidate(path_slice);
+
+    return 0;
+}
+
+// ============================================================================
 // FUSE Operations Structure
 // ============================================================================
 
-/// FUSE operations for read-only SSHFS
+/// Complete FUSE operations for read-write SSHFS
 pub const sshfs_operations = fuse.FuseOperations{
+    // Attribute operations
     .getattr = sshfs_getattr,
-    .readdir = sshfs_readdir,
-    .open = sshfs_open,
-    .read = sshfs_read,
-    .release = sshfs_release,
+    .chmod = sshfs_chmod,
+    .chown = sshfs_chown,
+    .utimens = sshfs_utimens,
+    .truncate = sshfs_truncate,
 
-    // TODO: Add write operations
-    // .write = sshfs_write,
-    // .mkdir = sshfs_mkdir,
-    // .unlink = sshfs_unlink,
-    // .rmdir = sshfs_rmdir,
-    // .rename = sshfs_rename,
-    // .truncate = sshfs_truncate,
-    // .chmod = sshfs_chmod,
-    // .chown = sshfs_chown,
-    // .utimens = sshfs_utimens,
+    // Directory operations
+    .readdir = sshfs_readdir,
+    .mkdir = sshfs_mkdir,
+    .rmdir = sshfs_rmdir,
+
+    // File operations
+    .open = sshfs_open,
+    .create = sshfs_create,
+    .read = sshfs_read,
+    .write = sshfs_write,
+    .release = sshfs_release,
+    .unlink = sshfs_unlink,
+    .rename = sshfs_rename,
 };

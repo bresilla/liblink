@@ -1,40 +1,69 @@
 const std = @import("std");
-const sshfs = @import("../lib/sshfs/filesystem.zig");
+const voidbox = @import("voidbox");
+const sshfs = voidbox.sshfs.filesystem;
 
 /// SSHFS Command-line Tool
 ///
 /// Mount remote directories over SSH using FUSE.
 
-const usage =
-    \\Usage: sshfs [user@]host:[remote_path] <mount_point> [options]
-    \\
-    \\Options:
-    \\  -p PORT          SSH port (default: 22)
-    \\  -i KEYFILE       Private key file for authentication
-    \\  -o allow_other   Allow other users to access mount
-    \\  -o allow_root    Allow root to access mount
-    \\  -d               Enable debug output
-    \\  -f               Run in foreground
-    \\  --cache-ttl N    Cache TTL in seconds (default: 5)
-    \\  -h, --help       Show this help message
-    \\
-    \\Examples:
-    \\  # Mount with password authentication
-    \\  sshfs user@example.com:/remote/path /mnt/local
-    \\
-    \\  # Mount with SSH key
-    \\  sshfs -i ~/.ssh/id_ed25519 user@example.com:/home /mnt/home
-    \\
-    \\  # Mount with custom port
-    \\  sshfs -p 2222 user@example.com:/data /mnt/data
-    \\
-    \\  # Mount with debug output
-    \\  sshfs -d user@example.com:/tmp /mnt/tmp
-    \\
-    \\To unmount:
-    \\  fusermount -u /mnt/local
-    \\
-;
+// ANSI color codes
+const Color = struct {
+    const reset = "\x1b[0m";
+    const bold = "\x1b[1m";
+    const dim = "\x1b[2m";
+    const red = "\x1b[31m";
+    const green = "\x1b[32m";
+    const yellow = "\x1b[33m";
+    const blue = "\x1b[34m";
+    const magenta = "\x1b[35m";
+    const cyan = "\x1b[36m";
+    const white = "\x1b[37m";
+    const gray = "\x1b[90m";
+
+    const bold_green = "\x1b[1;32m";
+    const bold_red = "\x1b[1;31m";
+    const bold_yellow = "\x1b[1;33m";
+    const bold_blue = "\x1b[1;34m";
+    const bold_cyan = "\x1b[1;36m";
+    const bold_magenta = "\x1b[1;35m";
+};
+
+fn printUsage() void {
+    const c = Color;
+
+    // Header
+    std.debug.print("{s}sshfs{s} - Mount remote directories over SSH using FUSE\n\n", .{ c.bold_cyan, c.reset });
+
+    // Usage
+    std.debug.print("{s}USAGE:{s}\n", .{ c.bold_yellow, c.reset });
+    std.debug.print("    {s}sshfs{s} [user@]host:[remote_path] <mount_point> [options]\n\n", .{ c.cyan, c.reset });
+
+    // Options
+    std.debug.print("{s}OPTIONS:{s}\n", .{ c.bold_yellow, c.reset });
+    std.debug.print("    {s}-p{s} PORT          SSH port (default: 22)\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-i{s} KEYFILE       Private key file for authentication\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-o{s} allow_other   Allow other users to access mount\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-o{s} allow_root    Allow root to access mount\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-d{s}               Enable debug output\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-f{s}               Run in foreground\n", .{ c.green, c.reset });
+    std.debug.print("    {s}--cache-ttl{s} N    Cache TTL in seconds (default: 5)\n", .{ c.green, c.reset });
+    std.debug.print("    {s}-h, --help{s}       Show this help message\n\n", .{ c.green, c.reset });
+
+    // Examples
+    std.debug.print("{s}EXAMPLES:{s}\n", .{ c.bold_yellow, c.reset });
+    std.debug.print("    {s}# Mount with password authentication{s}\n", .{ c.gray, c.reset });
+    std.debug.print("    {s}sshfs user@example.com:/remote/path /mnt/local{s}\n\n", .{ c.cyan, c.reset });
+    std.debug.print("    {s}# Mount with SSH key{s}\n", .{ c.gray, c.reset });
+    std.debug.print("    {s}sshfs -i ~/.ssh/id_ed25519 user@example.com:/home /mnt/home{s}\n\n", .{ c.cyan, c.reset });
+    std.debug.print("    {s}# Mount with custom port{s}\n", .{ c.gray, c.reset });
+    std.debug.print("    {s}sshfs -p 2222 user@example.com:/data /mnt/data{s}\n\n", .{ c.cyan, c.reset });
+    std.debug.print("    {s}# Mount with debug output{s}\n", .{ c.gray, c.reset });
+    std.debug.print("    {s}sshfs -d user@example.com:/tmp /mnt/tmp{s}\n\n", .{ c.cyan, c.reset });
+
+    // Unmount
+    std.debug.print("{s}UNMOUNT:{s}\n", .{ c.bold_yellow, c.reset });
+    std.debug.print("    {s}fusermount -u /mnt/local{s}\n", .{ c.cyan, c.reset });
+}
 
 const Config = struct {
     hostname: []const u8,
@@ -101,7 +130,7 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            std.debug.print("{s}", .{usage});
+            printUsage();
             std.process.exit(0);
         } else if (std.mem.eql(u8, arg, "-p")) {
             const port_str = args.next() orelse return error.MissingPortValue;
@@ -126,7 +155,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             const ttl_str = args.next() orelse return error.MissingCacheTTL;
             config.cache_ttl = try std.fmt.parseInt(u64, ttl_str, 10);
         } else if (arg[0] == '-') {
-            std.debug.print("Unknown option: {s}\n", .{arg});
+            std.debug.print("{s}Error:{s} Unknown option: {s}\n\n", .{ Color.bold_red, Color.reset, arg });
+            printUsage();
             return error.UnknownOption;
         } else {
             // Positional arguments
@@ -135,7 +165,8 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
             } else if (mount_point == null) {
                 mount_point = try allocator.dupe(u8, arg);
             } else {
-                std.debug.print("Too many arguments\n", .{});
+                std.debug.print("{s}Error:{s} Too many arguments\n\n", .{ Color.bold_red, Color.reset });
+                printUsage();
                 return error.TooManyArguments;
             }
         }
@@ -143,12 +174,14 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 
     // Validate required arguments
     if (host_str == null) {
-        std.debug.print("Error: Missing host argument\n\n{s}", .{usage});
+        std.debug.print("{s}Error:{s} Missing host argument\n\n", .{ Color.bold_red, Color.reset });
+        printUsage();
         return error.MissingHost;
     }
 
     if (mount_point == null) {
-        std.debug.print("Error: Missing mount point\n\n{s}", .{usage});
+        std.debug.print("{s}Error:{s} Missing mount point\n\n", .{ Color.bold_red, Color.reset });
+        printUsage();
         return error.MissingMountPoint;
     }
 
@@ -163,19 +196,11 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
 }
 
 fn getPassword(allocator: std.mem.Allocator) ![]const u8 {
-    const stdin = std.io.getStdIn();
-    const stdout = std.io.getStdOut();
-
-    try stdout.writeAll("Password: ");
-
-    // TODO: Disable echo for password input
-    // For now, just read the line
-
-    var buf: [256]u8 = undefined;
-    const bytes_read = try stdin.read(&buf);
-    const password = std.mem.trim(u8, buf[0..bytes_read], &std.ascii.whitespace);
-
-    return try allocator.dupe(u8, password);
+    // TODO: Implement password input
+    _ = allocator;
+    std.debug.print("{s}Error:{s} Password authentication via stdin not yet implemented\n", .{ Color.bold_red, Color.reset });
+    std.debug.print("Please pass password via environment variable for now\n", .{});
+    return error.NotImplemented;
 }
 
 pub fn main() !void {
@@ -184,15 +209,21 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const config = parseArgs(allocator) catch |err| {
-        std.debug.print("Error parsing arguments: {}\n", .{err});
+        std.debug.print("{s}Error:{s} Failed to parse arguments: {any}\n", .{ Color.bold_red, Color.reset, err });
         return err;
     };
 
-    std.debug.print("SSHFS: Mounting {s}@{s}:{s} on {s}\n", .{
+    std.debug.print("{s}[SSHFS]{s} Mounting {s}{s}@{s}:{s}{s} on {s}{s}{s}\n", .{
+        Color.bold_blue,
+        Color.reset,
+        Color.cyan,
         config.username,
         config.hostname,
         config.remote_path,
+        Color.reset,
+        Color.green,
         config.mount_point,
+        Color.reset,
     });
 
     // Mount options
@@ -206,18 +237,10 @@ pub fn main() !void {
 
     // Mount with appropriate authentication
     if (config.keyfile) |keyfile| {
-        // Public key authentication
-        std.debug.print("Using SSH key: {s}\n", .{keyfile});
-        try sshfs.mountWithKey(
-            allocator,
-            config.hostname,
-            config.port,
-            config.username,
-            keyfile,
-            config.remote_path,
-            config.mount_point,
-            opts,
-        );
+        // Public key authentication (not yet implemented)
+        std.debug.print("{s}Error:{s} Public key authentication not yet implemented\n", .{ Color.bold_red, Color.reset });
+        std.debug.print("Key file: {s}\n", .{keyfile});
+        return error.NotImplemented;
     } else {
         // Password authentication
         const password = try getPassword(allocator);
@@ -235,6 +258,6 @@ pub fn main() !void {
         );
     }
 
-    std.debug.print("Filesystem mounted successfully!\n", .{});
-    std.debug.print("To unmount: fusermount -u {s}\n", .{config.mount_point});
+    std.debug.print("{s}✓{s} Filesystem mounted successfully!\n", .{ Color.bold_green, Color.reset });
+    std.debug.print("{s}→{s} To unmount: {s}fusermount -u {s}{s}\n", .{ Color.blue, Color.reset, Color.cyan, config.mount_point, Color.reset });
 }

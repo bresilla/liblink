@@ -106,7 +106,7 @@ pub const FuseFillDirT = *const fn (
     name: [*:0]const u8,
     stbuf: ?*const Stat,
     off: off_t,
-) callconv(.C) c_int;
+) callconv(.c) c_int;
 
 /// Directory entry with offset
 pub const FuseDirHandle = opaque {};
