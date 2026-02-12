@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 // Import modules
 const kex_exchange = @import("kex/exchange.zig");
 const quic_transport = @import("transport/quic_transport.zig");
+const udp = @import("network/udp.zig");
 const constants = @import("common/constants.zig");
 
 /// SSH/QUIC connection configuration
@@ -62,12 +63,22 @@ pub const ClientConnection = struct {
     /// Establish a new SSH/QUIC connection to a server
     ///
     /// This performs:
-    /// 1. SSH key exchange (SSH_QUIC_INIT/REPLY)
-    /// 2. QUIC secret derivation
-    /// 3. QUIC connection initialization
+    /// 1. SSH key exchange (SSH_QUIC_INIT/REPLY) over UDP
+    /// 2. QUIC secret derivation from SSH exchange
+    /// 3. QUIC connection initialization with SSH secrets
     ///
     /// Returns ready-to-use connection
     pub fn connect(allocator: Allocator, config: ConnectionConfig) !Self {
+        std.log.info("Connecting to {}:{}...", .{ config.server_address, config.server_port });
+
+        // Initialize UDP transport for key exchange
+        var udp_transport = try udp.KeyExchangeTransport.initClient(
+            allocator,
+            config.server_address,
+            config.server_port,
+        );
+        defer udp_transport.deinit();
+
         // Initialize key exchange
         var kex = kex_exchange.ClientKeyExchange.init(allocator, config.random);
         errdefer kex.deinit();
@@ -81,38 +92,36 @@ pub const ClientConnection = struct {
         );
         defer allocator.free(init_data);
 
-        // TODO: Send init_data over UDP to server
-        // For now, this is a placeholder - actual network I/O would go here
-        std.log.info("Would send SSH_QUIC_INIT ({} bytes) to {}:{}", .{
-            init_data.len,
+        // Send SSH_QUIC_INIT over UDP
+        try udp_transport.sendInit(init_data);
+
+        // Receive SSH_QUIC_REPLY (with 10 second timeout)
+        const reply_data = try udp_transport.receiveReply(10000);
+        defer allocator.free(reply_data);
+
+        // Process reply and derive QUIC secrets
+        std.log.info("Processing SSH_QUIC_REPLY...", .{});
+        const secrets = try kex.processReply(reply_data);
+
+        // Initialize QUIC transport with SSH-derived secrets
+        std.log.info("Initializing QUIC connection...", .{});
+        var transport = try quic_transport.QuicTransport.init(
+            allocator,
             config.server_address,
             config.server_port,
-        });
+            &secrets.client_secret,
+            &secrets.server_secret,
+            false, // client mode
+        );
+        errdefer transport.deinit();
 
-        // TODO: Receive SSH_QUIC_REPLY from server
-        // For now, simulate with error
-        return error.NetworkNotImplemented;
+        std.log.info("SSH/QUIC connection established", .{});
 
-        // When network is implemented, the flow would be:
-        // const reply_data = try receiveReply();
-        // defer allocator.free(reply_data);
-        //
-        // const secrets = try kex.processReply(reply_data);
-        //
-        // var transport = try quic_transport.QuicTransport.init(
-        //     allocator,
-        //     config.server_address,
-        //     config.server_port,
-        //     &secrets.client_secret,
-        //     &secrets.server_secret,
-        //     false, // client mode
-        // );
-        //
-        // return Self{
-        //     .allocator = allocator,
-        //     .transport = transport,
-        //     .kex = kex,
-        // };
+        return Self{
+            .allocator = allocator,
+            .transport = transport,
+            .kex = kex,
+        };
     }
 
     pub fn deinit(self: *Self) void {
@@ -152,15 +161,19 @@ pub const ServerConnection = struct {
     /// Accept and handle an incoming SSH/QUIC connection
     ///
     /// This performs:
-    /// 1. Receive and process SSH_QUIC_INIT
-    /// 2. Perform key exchange
-    /// 3. Send SSH_QUIC_REPLY
-    /// 4. Initialize QUIC connection with derived secrets
+    /// 1. Process SSH_QUIC_INIT
+    /// 2. Perform key exchange and derive secrets
+    /// 3. Initialize QUIC connection with derived secrets
+    ///
+    /// Note: This is used for testing. For production, use ConnectionListener.acceptConnection()
+    /// which also handles UDP I/O.
     pub fn accept(
         allocator: Allocator,
         config: ServerConfig,
         init_data: []const u8,
     ) !Self {
+        std.log.info("Processing SSH_QUIC_INIT ({} bytes)...", .{init_data.len});
+
         // Initialize server key exchange
         var kex = kex_exchange.ServerKeyExchange.init(allocator, config.random);
         errdefer kex.deinit();
@@ -175,8 +188,8 @@ pub const ServerConnection = struct {
         );
         defer allocator.free(result.reply_data);
 
-        // TODO: Send reply_data back to client over UDP
-        std.log.info("Would send SSH_QUIC_REPLY ({} bytes) to client", .{result.reply_data.len});
+        // Note: reply_data is created but not sent (caller would need to send it)
+        std.log.info("Created SSH_QUIC_REPLY ({} bytes)", .{result.reply_data.len});
 
         // Initialize QUIC transport with derived secrets
         var transport = try quic_transport.QuicTransport.init(
@@ -223,6 +236,7 @@ pub const ServerConnection = struct {
 pub const ConnectionListener = struct {
     allocator: Allocator,
     config: ServerConfig,
+    udp_transport: udp.KeyExchangeTransport,
 
     const Self = @This();
 
@@ -233,31 +247,73 @@ pub const ConnectionListener = struct {
             config.listen_port,
         });
 
+        // Initialize UDP transport for receiving key exchange messages
+        var udp_transport = try udp.KeyExchangeTransport.initServer(
+            allocator,
+            config.listen_address,
+            config.listen_port,
+        );
+        errdefer udp_transport.deinit();
+
         return Self{
             .allocator = allocator,
             .config = config,
+            .udp_transport = udp_transport,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        _ = self;
-        // Cleanup resources
+        self.udp_transport.deinit();
     }
 
     /// Accept the next incoming connection
     ///
     /// This blocks until a client connects
     pub fn acceptConnection(self: *Self) !ServerConnection {
-        // TODO: Implement actual UDP socket listening
-        // For now, return error
-        _ = self;
-        return error.NetworkNotImplemented;
+        std.log.info("Waiting for client connection...", .{});
 
-        // When implemented:
-        // const init_data = try receiveInitFromClient();
-        // defer self.allocator.free(init_data);
-        //
-        // return ServerConnection.accept(self.allocator, self.config, init_data);
+        // Receive SSH_QUIC_INIT from client
+        const init_result = try self.udp_transport.receiveInit();
+        defer self.allocator.free(init_result.init_data);
+
+        std.log.info("Received init from client, processing...", .{});
+
+        // Initialize server key exchange
+        var kex = kex_exchange.ServerKeyExchange.init(self.allocator, self.config.random);
+        errdefer kex.deinit();
+
+        // Process init and create reply
+        const result = try kex.processInitAndCreateReply(
+            init_result.init_data,
+            self.config.quic_versions,
+            self.config.quic_params,
+            self.config.host_key,
+            self.config.host_private_key,
+        );
+        defer self.allocator.free(result.reply_data);
+
+        // Send SSH_QUIC_REPLY back to client
+        try self.udp_transport.sendReply(result.reply_data, init_result.client_address);
+
+        // Initialize QUIC transport with derived secrets
+        std.log.info("Initializing QUIC connection...", .{});
+        var transport = try quic_transport.QuicTransport.init(
+            self.allocator,
+            self.config.listen_address,
+            self.config.listen_port,
+            &result.client_secret,
+            &result.server_secret,
+            true, // server mode
+        );
+        errdefer transport.deinit();
+
+        std.log.info("Client connection established", .{});
+
+        return ServerConnection{
+            .allocator = self.allocator,
+            .transport = transport,
+            .kex = kex,
+        };
     }
 };
 

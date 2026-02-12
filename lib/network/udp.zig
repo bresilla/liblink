@@ -8,9 +8,10 @@ const net = std.net;
 /// before QUIC connection is established.
 
 pub const UdpSocket = struct {
-    socket: net.Stream,
+    socket: std.posix.socket_t,
     address: net.Address,
     allocator: Allocator,
+    is_server: bool,
 
     const Self = @This();
 
@@ -26,12 +27,18 @@ pub const UdpSocket = struct {
         const address = try net.Address.parseIp4(server_address, server_port);
 
         // Create UDP socket
-        const socket = try net.tcpConnectToAddress(address);
+        const socket = try std.posix.socket(
+            address.any.family,
+            std.posix.SOCK.DGRAM,
+            std.posix.IPPROTO.UDP,
+        );
+        errdefer std.posix.close(socket);
 
         return Self{
             .socket = socket,
             .address = address,
             .allocator = allocator,
+            .is_server = false,
         };
     }
 
@@ -46,25 +53,40 @@ pub const UdpSocket = struct {
         // Parse listen address
         const address = try net.Address.parseIp4(listen_address, listen_port);
 
-        // Create and bind UDP socket
-        const socket = try net.tcpConnectToAddress(address);
+        // Create UDP socket
+        const socket = try std.posix.socket(
+            address.any.family,
+            std.posix.SOCK.DGRAM,
+            std.posix.IPPROTO.UDP,
+        );
+        errdefer std.posix.close(socket);
+
+        // Bind to address
+        try std.posix.bind(socket, &address.any, address.getOsSockLen());
 
         return Self{
             .socket = socket,
             .address = address,
             .allocator = allocator,
+            .is_server = true,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.socket.close();
+        std.posix.close(self.socket);
     }
 
     /// Send UDP datagram to remote address
     ///
     /// Used by client to send SSH_QUIC_INIT to server
     pub fn send(self: *Self, data: []const u8) !void {
-        const bytes_sent = try self.socket.write(data);
+        const bytes_sent = try std.posix.sendto(
+            self.socket,
+            data,
+            0,
+            &self.address.any,
+            self.address.getOsSockLen(),
+        );
 
         if (bytes_sent != data.len) {
             return error.PartialSend;
@@ -79,7 +101,7 @@ pub const UdpSocket = struct {
         const buffer = try self.allocator.alloc(u8, max_size);
         errdefer self.allocator.free(buffer);
 
-        const bytes_received = try self.socket.read(buffer);
+        const bytes_received = try std.posix.recv(self.socket, buffer, 0);
 
         // Resize buffer to actual received size
         if (bytes_received < max_size) {
@@ -98,11 +120,26 @@ pub const UdpSocket = struct {
         max_size: usize,
         timeout_ms: u64,
     ) !?[]u8 {
-        _ = timeout_ms;
+        // Set socket timeout
+        const timeout = std.posix.timeval{
+            .tv_sec = @intCast(timeout_ms / 1000),
+            .tv_usec = @intCast((timeout_ms % 1000) * 1000),
+        };
 
-        // TODO: Implement proper timeout using poll/select
-        // For now, use blocking receive
-        return try self.receive(max_size);
+        try std.posix.setsockopt(
+            self.socket,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.RCVTIMEO,
+            std.mem.asBytes(&timeout),
+        );
+
+        // Try to receive
+        return self.receive(max_size) catch |err| {
+            if (err == error.WouldBlock) {
+                return null;
+            }
+            return err;
+        };
     }
 
     /// Receive from any client (server only)
@@ -112,12 +149,25 @@ pub const UdpSocket = struct {
         data: []u8,
         sender: net.Address,
     } {
-        const data = try self.receive(max_size);
-        errdefer self.allocator.free(data);
+        const buffer = try self.allocator.alloc(u8, max_size);
+        errdefer self.allocator.free(buffer);
 
-        // TODO: Actual recvfrom to get sender address
-        // For now, return a dummy address
-        const sender = try net.Address.parseIp4("0.0.0.0", 0);
+        var sender_addr: std.posix.sockaddr = undefined;
+        var sender_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
+
+        const bytes_received = try std.posix.recvfrom(
+            self.socket,
+            buffer,
+            0,
+            &sender_addr,
+            &sender_len,
+        );
+
+        // Resize buffer
+        const data = try self.allocator.realloc(buffer, bytes_received);
+
+        // Convert sockaddr to net.Address
+        const sender = net.Address.initPosix(@alignCast(&sender_addr));
 
         return .{
             .data = data,
@@ -129,11 +179,17 @@ pub const UdpSocket = struct {
     ///
     /// Used by server to send SSH_QUIC_REPLY back to client
     pub fn sendTo(self: *Self, data: []const u8, destination: net.Address) !void {
-        _ = destination;
+        const bytes_sent = try std.posix.sendto(
+            self.socket,
+            data,
+            0,
+            &destination.any,
+            destination.getOsSockLen(),
+        );
 
-        // TODO: Proper sendto with destination address
-        // For now, use regular send
-        try self.send(data);
+        if (bytes_sent != data.len) {
+            return error.PartialSend;
+        }
     }
 };
 
