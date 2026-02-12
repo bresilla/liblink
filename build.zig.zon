@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .zquic = .{
-            .url = "https://github.com/bresilla/zquic/archive/41d7c8bcb810cea7310fb8e8e03ae45b2b78d81c.tar.gz",
-            .hash = "zquic-0.9.5-2rPds5dtEgD4OPuk850jiA7M8l7pGx_BzSukH272YcRl",
+            .url = "https://github.com/bresilla/zquic/archive/707a71dba3d8080c60425a73934061557d31f34f.tar.gz",
+            .hash = "zquic-0.9.5-2rPds7ltEgAeRDie4ZVuh8yxSv5YBnzwwCOedc4_WkES",
         },
         .zcrypto = .{
             .url = "https://github.com/bresilla/zcrypto/archive/5e81af5723d7c6cdb27040a4e0ae6fbb548afdce.tar.gz",
