@@ -232,19 +232,72 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     };
     defer session.close() catch {};
 
-    std.debug.print("✓ Shell session started\n", .{});
-    std.debug.print("\n[Interactive shell would run here]\n", .{});
-    std.debug.print("Note: Full terminal I/O not yet implemented\n", .{});
-    std.debug.print("      Press Ctrl+C to exit\n\n", .{});
+    std.debug.print("✓ Shell session started\n\n", .{});
+    std.debug.print("Interactive shell session active. Type commands and press Enter.\n", .{});
+    std.debug.print("Press Ctrl+D or type 'exit' to close the session.\n\n", .{});
 
-    // TODO: Implement terminal I/O loop
-    // For now, just demonstrate the connection works
-    std.debug.print("Session is active. Stack trace:\n", .{});
-    std.debug.print("  1. UDP key exchange ✓\n", .{});
-    std.debug.print("  2. QUIC connection ✓\n", .{});
-    std.debug.print("  3. SSH authentication ✓\n", .{});
-    std.debug.print("  4. Channel open ✓\n", .{});
-    std.debug.print("  5. Shell request ✓\n", .{});
+    // Run interactive shell I/O loop
+    try runShellInteractive(allocator, &session);
+}
+
+fn runShellInteractive(allocator: std.mem.Allocator, session: *voidbox.channels.SessionChannel) !void {
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    // Simple line-based I/O loop
+    // Note: A production implementation would use raw terminal mode
+    // and handle character-by-character I/O with proper terminal control
+    while (true) {
+        // Read line from stdin
+        var line_buffer: [4096]u8 = undefined;
+        var byte_buffer: [1]u8 = undefined;
+        var line_len: usize = 0;
+
+        // Read until newline or EOF
+        while (true) {
+            const n = stdin.read(&byte_buffer) catch |err| {
+                if (err == error.EOF or err == error.EndOfStream) return;
+                return err;
+            };
+            if (n == 0) return; // EOF
+            if (byte_buffer[0] == '\n') break;
+            if (line_len >= line_buffer.len) return error.LineTooLong;
+            line_buffer[line_len] = byte_buffer[0];
+            line_len += 1;
+        }
+
+        const line = line_buffer[0..line_len];
+
+        // Check for exit command
+        if (std.mem.eql(u8, std.mem.trim(u8, line, &std.ascii.whitespace), "exit")) {
+            break;
+        }
+
+        // Append newline for the remote shell
+        var command_buffer: [4097]u8 = undefined;
+        @memcpy(command_buffer[0..line.len], line);
+        command_buffer[line.len] = '\n';
+        const command_with_newline = command_buffer[0 .. line.len + 1];
+
+        // Send command to remote shell
+        try session.sendData(command_with_newline);
+
+        // Receive response
+        // Note: This is simplified - a real implementation would handle
+        // partial reads, escape sequences, and asynchronous output
+        const response = session.receiveData() catch |err| {
+            var err_buf: [256]u8 = undefined;
+            const err_msg = try std.fmt.bufPrint(&err_buf, "Error receiving data: {}\n", .{err});
+            try stdout.writeAll(err_msg);
+            continue;
+        };
+        defer allocator.free(response);
+
+        // Write response to stdout
+        try stdout.writeAll(response);
+    }
+
+    try stdout.writeAll("\nClosing shell session...\n");
 }
 
 fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -416,22 +469,274 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 }
 
 fn runSftpInteractive(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient) !void {
-    std.debug.print("SFTP> ", .{});
-    std.debug.print("[Interactive SFTP not yet implemented]\n", .{});
-    std.debug.print("\nDemonstrating SFTP capabilities:\n", .{});
-    std.debug.print("  • Connection: ✓\n", .{});
-    std.debug.print("  • Authentication: ✓\n", .{});
-    std.debug.print("  • SFTP subsystem: ✓\n", .{});
-    std.debug.print("  • Protocol negotiation: ✓\n", .{});
-    std.debug.print("\nAvailable operations:\n", .{});
-    std.debug.print("  • open/close files\n", .{});
-    std.debug.print("  • read/write data\n", .{});
-    std.debug.print("  • list directories\n", .{});
-    std.debug.print("  • create/remove directories\n", .{});
-    std.debug.print("  • get file attributes\n", .{});
-    std.debug.print("  • rename/remove files\n", .{});
-    std.debug.print("\nTODO: Implement interactive command loop\n", .{});
+    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    _ = allocator;
-    _ = client;
+    var current_dir = std.ArrayList(u8).init(allocator);
+    defer current_dir.deinit();
+    try current_dir.appendSlice("/");
+
+    while (true) {
+        // Print prompt
+        try stdout.writeAll("sftp> ");
+
+        // Read command line
+        var line_buffer: [1024]u8 = undefined;
+        var line_len: usize = 0;
+
+        // Read until newline or EOF
+        var byte_buffer: [1]u8 = undefined;
+        while (true) {
+            const n = stdin.read(&byte_buffer) catch |err| {
+                if (err == error.EOF or err == error.EndOfStream) return;
+                return err;
+            };
+            if (n == 0) return; // EOF
+            if (byte_buffer[0] == '\n') break;
+            if (line_len >= line_buffer.len) continue; // Skip if line too long
+            line_buffer[line_len] = byte_buffer[0];
+            line_len += 1;
+        }
+
+        const line = line_buffer[0..line_len];
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+
+        if (trimmed.len == 0) continue;
+
+        // Parse command and arguments
+        var iter = std.mem.splitScalar(u8, trimmed, ' ');
+        const command = iter.next() orelse continue;
+
+        // Handle commands
+        if (std.mem.eql(u8, command, "exit") or std.mem.eql(u8, command, "quit")) {
+            break;
+        } else if (std.mem.eql(u8, command, "pwd")) {
+            try stdout.writeAll(current_dir.items);
+            try stdout.writeAll("\n");
+        } else if (std.mem.eql(u8, command, "ls")) {
+            const path = iter.next() orelse current_dir.items;
+            try sftpListDirectory(allocator, client, path);
+        } else if (std.mem.eql(u8, command, "cd")) {
+            const path = iter.next() orelse {
+                try stdout.writeAll("Error: path required\n");
+                continue;
+            };
+            // Update current directory (simplified - doesn't resolve paths)
+            current_dir.clearRetainingCapacity();
+            if (path[0] == '/') {
+                try current_dir.appendSlice(path);
+            } else {
+                try current_dir.appendSlice(current_dir.items);
+                if (current_dir.items[current_dir.items.len - 1] != '/') {
+                    try current_dir.append('/');
+                }
+                try current_dir.appendSlice(path);
+            }
+        } else if (std.mem.eql(u8, command, "get")) {
+            const remote_path = iter.next() orelse {
+                try stdout.writeAll("Error: remote path required\n");
+                continue;
+            };
+            const local_path = iter.next() orelse remote_path;
+            try sftpDownloadFile(allocator, client, remote_path, local_path);
+        } else if (std.mem.eql(u8, command, "put")) {
+            const local_path = iter.next() orelse {
+                try stdout.writeAll("Error: local path required\n");
+                continue;
+            };
+            const remote_path = iter.next() orelse local_path;
+            try sftpUploadFile(allocator, client, local_path, remote_path);
+        } else if (std.mem.eql(u8, command, "mkdir")) {
+            const path = iter.next() orelse {
+                try stdout.writeAll("Error: path required\n");
+                continue;
+            };
+            try sftpMkdir(client, path);
+        } else if (std.mem.eql(u8, command, "rm")) {
+            const path = iter.next() orelse {
+                try stdout.writeAll("Error: path required\n");
+                continue;
+            };
+            try sftpRemove(client, path);
+        } else if (std.mem.eql(u8, command, "help")) {
+            try stdout.writeAll(
+                \\Available commands:
+                \\  ls [path]              List directory
+                \\  cd <path>              Change directory
+                \\  pwd                    Print working directory
+                \\  get <remote> [local]   Download file
+                \\  put <local> [remote]   Upload file
+                \\  mkdir <path>           Create directory
+                \\  rm <path>              Remove file
+                \\  help                   Show this help
+                \\  exit/quit              Exit SFTP session
+                \\
+            );
+        } else {
+            try stdout.writeAll("Unknown command: ");
+            try stdout.writeAll(command);
+            try stdout.writeAll(". Type 'help' for available commands.\n");
+        }
+    }
+
+    try stdout.writeAll("Goodbye.\n");
+}
+
+fn sftpListDirectory(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    const handle = client.opendir(path) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error opening directory: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer client.close(handle) catch {};
+
+    const entries = client.readdir(handle) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error reading directory: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer {
+        for (entries) |entry| {
+            allocator.free(entry.filename);
+            allocator.free(entry.longname);
+        }
+        allocator.free(entries);
+    }
+
+    for (entries) |entry| {
+        try stdout.writeAll(entry.filename);
+        try stdout.writeAll("\n");
+    }
+}
+
+fn sftpDownloadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    const handle = client.open(remote_path, .read, .{}) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer client.close(handle) catch {};
+
+    const local_file = std.fs.cwd().createFile(local_path, .{}) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error creating local file: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer local_file.close();
+
+    var offset: u64 = 0;
+    var total_bytes: u64 = 0;
+
+    while (true) {
+        const data = client.read(handle, offset, 32768) catch |err| {
+            if (err == error.Eof) break;
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "Error reading file: {}\n", .{err});
+            try stdout.writeAll(msg);
+            return;
+        };
+        defer allocator.free(data);
+
+        if (data.len == 0) break;
+
+        local_file.writeAll(data) catch |err| {
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "Error writing to local file: {}\n", .{err});
+            try stdout.writeAll(msg);
+            return;
+        };
+
+        offset += data.len;
+        total_bytes += data.len;
+    }
+
+    var buf: [512]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "Downloaded {} bytes to {s}\n", .{ total_bytes, local_path });
+    try stdout.writeAll(msg);
+}
+
+fn sftpUploadFile(allocator: std.mem.Allocator, client: *voidbox.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
+    _ = allocator; // Currently unused but may be needed for future enhancements
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    const local_file = std.fs.cwd().openFile(local_path, .{}) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error opening local file: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer local_file.close();
+
+    const handle = client.open(remote_path, .write, .{ .create = true, .truncate = true }) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    defer client.close(handle) catch {};
+
+    var buffer: [32768]u8 = undefined;
+    var offset: u64 = 0;
+    var total_bytes: u64 = 0;
+
+    while (true) {
+        const bytes_read = local_file.read(&buffer) catch |err| {
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "Error reading local file: {}\n", .{err});
+            try stdout.writeAll(msg);
+            return;
+        };
+
+        if (bytes_read == 0) break;
+
+        client.write(handle, offset, buffer[0..bytes_read]) catch |err| {
+            var buf: [256]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "Error writing to remote file: {}\n", .{err});
+            try stdout.writeAll(msg);
+            return;
+        };
+
+        offset += bytes_read;
+        total_bytes += bytes_read;
+    }
+
+    var buf: [512]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&buf, "Uploaded {} bytes to {s}\n", .{ total_bytes, remote_path });
+    try stdout.writeAll(msg);
+}
+
+fn sftpMkdir(client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    client.mkdir(path, .{}) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error creating directory: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    try stdout.writeAll("Directory created: ");
+    try stdout.writeAll(path);
+    try stdout.writeAll("\n");
+}
+
+fn sftpRemove(client: *voidbox.sftp.SftpClient, path: []const u8) !void {
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+
+    client.remove(path) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Error removing file: {}\n", .{err});
+        try stdout.writeAll(msg);
+        return;
+    };
+    try stdout.writeAll("Removed: ");
+    try stdout.writeAll(path);
+    try stdout.writeAll("\n");
 }
