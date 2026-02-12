@@ -1,6 +1,7 @@
 const std = @import("std");
 const voidbox = @import("voidbox");
 const sshfs = voidbox.sshfs.filesystem;
+const keyfile = @import("voidbox").auth.keyfile;
 
 /// SSHFS Command-line Tool
 ///
@@ -195,6 +196,77 @@ fn parseArgs(allocator: std.mem.Allocator) !Config {
     return config;
 }
 
+fn mountWithPublicKey(
+    allocator: std.mem.Allocator,
+    config: Config,
+    opts: sshfs.SshFilesystem.Options,
+    parsed_key: *const keyfile.ParsedKey,
+) !void {
+    // Create SSH connection
+    const random = std.crypto.random;
+    var conn = try voidbox.connection.connectClient(
+        allocator,
+        config.hostname,
+        config.port,
+        random,
+    );
+    defer conn.deinit();
+
+    std.debug.print("{s}✓{s} SSH/QUIC connection established\n", .{ Color.bold_green, Color.reset });
+
+    // Authenticate with public key
+    std.debug.print("{s}[AUTH]{s} Authenticating as {s}{s}{s} with {s}...\n", .{
+        Color.bold_blue,
+        Color.reset,
+        Color.cyan,
+        config.username,
+        Color.reset,
+        parsed_key.algorithm_name,
+    });
+
+    // Validate key sizes for Ed25519
+    if (parsed_key.key_type == .ed25519) {
+        if (parsed_key.private_key.len != 64) {
+            std.debug.print("{s}Error:{s} Invalid Ed25519 private key size: {} bytes (expected 64)\n", .{
+                Color.bold_red,
+                Color.reset,
+                parsed_key.private_key.len,
+            });
+            return error.InvalidKeySize;
+        }
+    }
+
+    const auth_success = try conn.authenticatePublicKey(
+        config.username,
+        parsed_key.algorithm_name,
+        parsed_key.public_key,
+        parsed_key.private_key[0..64],
+    );
+
+    if (!auth_success) {
+        std.debug.print("{s}Error:{s} Authentication failed\n", .{ Color.bold_red, Color.reset });
+        return error.AuthenticationFailed;
+    }
+
+    std.debug.print("{s}✓{s} Authentication successful\n", .{ Color.bold_green, Color.reset });
+
+    // Create filesystem
+    var fs = try sshfs.SshFilesystem.init(allocator, &conn, config.mount_point, opts);
+    defer fs.deinit();
+
+    std.debug.print("{s}✓{s} Filesystem mounted successfully!\n", .{ Color.bold_green, Color.reset });
+    std.debug.print("{s}→{s} To unmount: {s}fusermount -u {s}{s}\n", .{
+        Color.blue,
+        Color.reset,
+        Color.cyan,
+        config.mount_point,
+        Color.reset,
+    });
+
+    // Mount (this will block until unmounted)
+    try fs.mount(opts);
+}
+
 fn getPassword(allocator: std.mem.Allocator) ![]const u8 {
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -289,11 +361,28 @@ pub fn main() !void {
     };
 
     // Mount with appropriate authentication
-    if (config.keyfile) |keyfile| {
-        // Public key authentication (not yet implemented)
-        std.debug.print("{s}Error:{s} Public key authentication not yet implemented\n", .{ Color.bold_red, Color.reset });
-        std.debug.print("Key file: {s}\n", .{keyfile});
-        return error.NotImplemented;
+    if (config.keyfile) |keyfile_path| {
+        // Public key authentication
+        std.debug.print("{s}[AUTH]{s} Using key file: {s}{s}{s}\n", .{
+            Color.bold_blue,
+            Color.reset,
+            Color.cyan,
+            keyfile_path,
+            Color.reset,
+        });
+
+        var parsed_key = keyfile.parsePrivateKeyFile(allocator, keyfile_path) catch |err| {
+            std.debug.print("{s}Error:{s} Failed to parse key file: {any}\n", .{ Color.bold_red, Color.reset, err });
+            return err;
+        };
+        defer parsed_key.deinit();
+
+        try mountWithPublicKey(
+            allocator,
+            config,
+            opts,
+            &parsed_key,
+        );
     } else {
         // Password authentication
         const password = try getPassword(allocator);

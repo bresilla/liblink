@@ -41,7 +41,7 @@ pub const KeyPair = struct {
     }
 };
 
-/// Sign data with Ed25519  
+/// Sign data with Ed25519
 pub fn signEd25519(data: []const u8, private_key: *const [64]u8, signature: *[64]u8) void {
     // Simple signing using Zig's std.crypto
     // In production, would use proper Ed25519 signing
@@ -51,6 +51,13 @@ pub fn signEd25519(data: []const u8, private_key: *const [64]u8, signature: *[64
     var hash: [64]u8 = undefined;
     hasher.final(&hash);
     @memcpy(signature, &hash);
+}
+
+/// Sign data with Ed25519 and return signature
+pub fn sign(data: []const u8, private_key: *const [64]u8) [64]u8 {
+    var signature: [64]u8 = undefined;
+    signEd25519(data, private_key, &signature);
+    return signature;
 }
 
 /// Verify Ed25519 signature

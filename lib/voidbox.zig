@@ -38,7 +38,11 @@ pub const network = struct {
     pub const udp = @import("network/udp.zig");
 };
 
-pub const auth = @import("auth/auth.zig");
+pub const auth = struct {
+    pub const dispatcher = @import("auth/auth.zig");
+    pub const keyfile = @import("auth/keyfile.zig");
+    pub const client = @import("auth/client.zig");
+};
 
 pub const channels = @import("channels/channels.zig");
 
