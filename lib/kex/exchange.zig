@@ -163,6 +163,13 @@ pub const ClientKeyExchange = struct {
             .server_secret = quic_secrets.server_secret,
         };
     }
+
+    /// Get exchange hash (session identifier for authentication)
+    ///
+    /// Must be called after processReply() has completed successfully.
+    pub fn getExchangeHash(self: *const Self) []const u8 {
+        return self.exchange_hash orelse &[_]u8{};
+    }
 };
 
 /// Server key exchange state machine
@@ -317,6 +324,13 @@ pub const ServerKeyExchange = struct {
             .client_secret = quic_secrets.client_secret,
             .server_secret = quic_secrets.server_secret,
         };
+    }
+
+    /// Get exchange hash (session identifier for authentication)
+    ///
+    /// Must be called after processInitAndCreateReply() has completed successfully.
+    pub fn getExchangeHash(self: *const Self) []const u8 {
+        return self.exchange_hash orelse &[_]u8{};
     }
 };
 

@@ -40,6 +40,8 @@ pub const network = struct {
 
 pub const auth = @import("auth/auth.zig");
 
+pub const channels = @import("channels/channels.zig");
+
 pub const sftp = @import("sftp/sftp.zig");
 
 pub const connection = @import("connection.zig");

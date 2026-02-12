@@ -123,8 +123,8 @@ pub const UdpSocket = struct {
     ) !?[]u8 {
         // Set socket timeout
         const timeout = std.posix.timeval{
-            .tv_sec = @intCast(timeout_ms / 1000),
-            .tv_usec = @intCast((timeout_ms % 1000) * 1000),
+            .sec = @intCast(timeout_ms / 1000),
+            .usec = @intCast((timeout_ms % 1000) * 1000),
         };
 
         try std.posix.setsockopt(
@@ -239,7 +239,7 @@ pub const KeyExchangeTransport = struct {
     pub fn sendInit(self: *Self, init_data: []const u8) !void {
         try self.socket.send(init_data);
 
-        std.log.info("Sent SSH_QUIC_INIT ({} bytes)", .{init_data.len});
+        std.log.info("Sent SSH_QUIC_INIT ({any} bytes)", .{init_data.len});
     }
 
     /// Receive SSH_QUIC_REPLY (client)
@@ -253,7 +253,7 @@ pub const KeyExchangeTransport = struct {
         const data = (try self.socket.receiveWithTimeout(max_size, timeout_ms)) orelse
             return error.ReceiveTimeout;
 
-        std.log.info("Received SSH_QUIC_REPLY ({} bytes)", .{data.len});
+        std.log.info("Received SSH_QUIC_REPLY ({any} bytes)", .{data.len});
 
         return data;
     }
@@ -271,7 +271,7 @@ pub const KeyExchangeTransport = struct {
 
         const result = try self.socket.receiveFrom(max_size);
 
-        std.log.info("Received SSH_QUIC_INIT from {any} ({} bytes)", .{
+        std.log.info("Received SSH_QUIC_INIT from {any} ({any} bytes)", .{
             result.sender,
             result.data.len,
         });
@@ -286,7 +286,7 @@ pub const KeyExchangeTransport = struct {
     pub fn sendReply(self: *Self, reply_data: []const u8, client_address: Address) !void {
         try self.socket.sendTo(reply_data, client_address);
 
-        std.log.info("Sent SSH_QUIC_REPLY to {any} ({} bytes)", .{
+        std.log.info("Sent SSH_QUIC_REPLY to {any} ({any} bytes)", .{
             client_address,
             reply_data.len,
         });
