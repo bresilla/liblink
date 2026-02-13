@@ -1,6 +1,12 @@
 const std = @import("std");
 const posix = std.posix;
 
+// External C functions for PTY
+extern "c" fn grantpt(fd: c_int) c_int;
+extern "c" fn unlockpt(fd: c_int) c_int;
+extern "c" fn ptsname(fd: c_int) [*:0]const u8;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
 /// PTY (Pseudo-Terminal) for shell sessions
 ///
 /// Platform-specific implementation for Linux/Unix
@@ -22,17 +28,18 @@ pub const Pty = struct {
         errdefer posix.close(master_fd);
 
         // Grant access and unlock
-        if (std.c.grantpt(master_fd) != 0) {
+        if (grantpt(master_fd) != 0) {
             return error.GrantPtFailed;
         }
 
-        if (std.c.unlockpt(master_fd) != 0) {
+        if (unlockpt(master_fd) != 0) {
             return error.UnlockPtFailed;
         }
 
         // Get slave device name
-        const slave_name = std.c.ptsname(master_fd) orelse return error.PtsnameFailed;
-        const slave_path = try allocator.dupe(u8, std.mem.span(slave_name));
+        const slave_name_ptr = ptsname(master_fd);
+        const slave_name = std.mem.span(slave_name_ptr);
+        const slave_path = try allocator.dupe(u8, slave_name);
         errdefer allocator.free(slave_path);
 
         return Self{
@@ -60,14 +67,16 @@ pub const Pty = struct {
 
     /// Set terminal window size
     pub fn setWindowSize(self: *Self, rows: u16, cols: u16) !void {
-        const winsize = std.c.winsize{
-            .ws_row = rows,
-            .ws_col = cols,
-            .ws_xpixel = 0,
-            .ws_ypixel = 0,
+        const winsize = posix.winsize{
+            .row = rows,
+            .col = cols,
+            .xpixel = 0,
+            .ypixel = 0,
         };
 
-        if (std.c.ioctl(self.master_fd, std.c.T.IOCSWINSZ, @intFromPtr(&winsize)) != 0) {
+        const TIOCSWINSZ = 0x5414; // Linux ioctl number for setting window size
+        const result = std.c.ioctl(self.master_fd, TIOCSWINSZ, @intFromPtr(&winsize));
+        if (result != 0) {
             return error.IoctlFailed;
         }
     }
@@ -109,7 +118,8 @@ fn childSetup(pty: *Pty) !void {
     errdefer posix.close(slave_fd);
 
     // Make slave the controlling terminal
-    if (std.c.ioctl(slave_fd, std.c.T.IOCSCTTY, @as(c_int, 0)) != 0) {
+    const TIOCSCTTY = 0x540E; // Linux ioctl number for setting controlling terminal
+    if (std.c.ioctl(slave_fd, TIOCSCTTY, @as(c_int, 0)) != 0) {
         return error.IoctlFailed;
     }
 
@@ -127,7 +137,7 @@ fn childSetup(pty: *Pty) !void {
     posix.close(pty.master_fd);
 
     // Set environment
-    try posix.setenv("TERM", "xterm-256color", 1);
+    _ = setenv("TERM", "xterm-256color", 1);
 
     // Execute shell
     const shell = "/bin/bash";

@@ -194,6 +194,73 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
 /// Active shell sessions (stream_id -> PTY)
 var active_shells = std.AutoHashMap(u64, *syslink.platform.pty.Pty).init(std.heap.page_allocator);
 
+/// Bridge I/O between PTY and SSH channel
+fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u64) !void {
+    const pty = active_shells.get(stream_id) orelse return error.NoPtyForSession;
+
+    std.debug.print("Starting I/O bridge for stream {}...\n", .{stream_id});
+
+    var pty_buffer: [4096]u8 = undefined;
+    var channel_buffer: [4096]u8 = undefined;
+
+    // Set PTY to non-blocking mode
+    const flags = try std.posix.fcntl(pty.master_fd, std.posix.F.GETFL, 0);
+    _ = try std.posix.fcntl(pty.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+
+    // I/O loop
+    while (true) {
+        // Poll for incoming data from client
+        server_conn.transport.poll(100) catch {}; // 100ms timeout, ignore errors
+
+        // Read from SSH channel (client input) and write to PTY
+        const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch 0;
+        if (channel_len > 0) {
+            const data = channel_buffer[0..channel_len];
+            std.debug.print("← Client sent {} bytes\n", .{channel_len});
+
+            // Decode CHANNEL_DATA message
+            if (data.len > 0 and data[0] == 94) { // SSH_MSG_CHANNEL_DATA
+                var channel_data = syslink.ChannelData.decode(server_conn.allocator, data) catch continue;
+                defer channel_data.deinit(server_conn.allocator);
+
+                // Write to PTY (send to shell)
+                _ = pty.write(channel_data.data) catch |err| {
+                    std.debug.print("PTY write error: {}\n", .{err});
+                    break;
+                };
+            } else if (data.len > 0 and data[0] == 96) { // SSH_MSG_CHANNEL_EOF
+                std.debug.print("Client sent EOF\n", .{});
+                break;
+            }
+        }
+
+        // Read from PTY (shell output) and send to SSH channel
+        const pty_len = pty.read(&pty_buffer) catch |err| {
+            if (err == error.WouldBlock) {
+                // No data available, continue
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            }
+            std.debug.print("PTY read error: {}\n", .{err});
+            break;
+        };
+
+        if (pty_len > 0) {
+            std.debug.print("→ Shell output {} bytes\n", .{pty_len});
+            // Send shell output to client
+            try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
+        }
+    }
+
+    std.debug.print("Session ended for stream {}\n", .{stream_id});
+
+    // Clean up
+    if (active_shells.fetchRemove(stream_id)) |entry| {
+        entry.value.deinit();
+        server_conn.allocator.destroy(entry.value);
+    }
+}
+
 /// Shell handler - called when client requests a shell
 fn shellHandler(stream_id: u64) !void {
     std.debug.print("  → Shell requested on stream {}\n", .{stream_id});

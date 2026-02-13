@@ -71,6 +71,12 @@ pub const fuse = struct {
 
 pub const connection = @import("connection.zig");
 
+pub const platform = struct {
+    pub const pty = @import("platform/pty.zig");
+};
+
+pub const ChannelData = @import("protocol/channel.zig").ChannelData;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("protocol/integration_test.zig");
