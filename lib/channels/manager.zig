@@ -255,11 +255,57 @@ pub const ChannelManager = struct {
     /// Reads and decodes CHANNEL_DATA message from stream.
     /// Returns the payload data. Caller owns the memory.
     pub fn receiveData(self: *Self, stream_id: u64) ![]u8 {
+        // Use a large buffer to accumulate the complete message
         var buffer: [65536]u8 = undefined;
-        const len = try self.transport.receiveFromStream(stream_id, &buffer);
-        const raw_data = buffer[0..len];
+        var total_received: usize = 0;
 
-        const data_msg = try channel_protocol.ChannelData.decode(self.allocator, raw_data);
+        // First, we need at least 5 bytes for the message header (type + length)
+        while (total_received < 5) {
+            const len = try self.transport.receiveFromStream(stream_id, buffer[total_received..]);
+            if (len == 0) {
+                if (total_received == 0) return error.NoData;
+                // Poll for more data
+                self.transport.poll(100) catch {};
+                continue;
+            }
+            total_received += len;
+        }
+
+        // Parse message type
+        if (buffer[0] != 94) { // SSH_MSG_CHANNEL_DATA
+            std.log.err("receiveData: unexpected message type {}, expected 94 (CHANNEL_DATA)", .{buffer[0]});
+            return error.InvalidMessageType;
+        }
+
+        // Parse data length (4 bytes, big-endian)
+        const data_len = std.mem.readInt(u32, buffer[1..5], .big);
+        const total_msg_len = 5 + data_len; // header (5 bytes) + data
+
+        // std.log.debug("receiveData: message claims {} bytes of data, total message = {} bytes", .{ data_len, total_msg_len });
+
+        // Read the rest of the message, polling for more data if needed
+        var poll_attempts: u32 = 0;
+        while (total_received < total_msg_len) {
+            const len = try self.transport.receiveFromStream(stream_id, buffer[total_received..]);
+            if (len == 0) {
+                // No more data in buffer, poll for more packets
+                poll_attempts += 1;
+                if (poll_attempts > 100) { // 10 seconds timeout
+                    std.log.err("receiveData: timeout waiting for complete message, got {} bytes, expected {}", .{ total_received, total_msg_len });
+                    return error.IncompleteMessage;
+                }
+                self.transport.poll(100) catch {}; // 100ms poll
+                continue;
+            }
+            total_received += len;
+            poll_attempts = 0; // Reset timeout counter when we get data
+            // std.log.debug("receiveData: read {} more bytes, total now {}/{}", .{ len, total_received, total_msg_len });
+        }
+
+        // std.log.debug("receiveData: complete message received, {} bytes total", .{total_received});
+
+        // Now decode the complete message
+        const data_msg = try channel_protocol.ChannelData.decode(self.allocator, buffer[0..total_received]);
         // Don't defer deinit - caller owns the data
 
         return @constCast(data_msg.data);

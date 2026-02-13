@@ -158,34 +158,60 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
     try server_conn.channel_manager.acceptChannel(stream_id);
     std.debug.print("✓ Session channel accepted on stream {}\n", .{stream_id});
 
-    // Wait for channel request (shell, exec, or subsystem)
+    // Wait for channel requests (may receive pty-req, then shell/exec/subsystem)
     std.debug.print("Waiting for channel request...\n", .{});
-
-    // Poll to receive channel request packet
-    try server_conn.transport.poll(30000);
-
-    // Receive and handle the request
-    var buffer: [4096]u8 = undefined;
-    const len = try server_conn.transport.receiveFromStream(stream_id, &buffer);
-    const data = buffer[0..len];
-
-    std.debug.print("Received channel request ({} bytes)\n", .{len});
 
     var session_server = channels.SessionServer.init(server_conn.allocator, &server_conn.channel_manager);
 
-    // Handle the request (shell, exec, or subsystem)
-    session_server.handleRequest(
-        stream_id,
-        data,
-        shellHandler,
-        execHandler,
-        subsystemHandler,
-    ) catch |err| {
-        std.debug.print("✗ Failed to handle request: {}\n", .{err});
-        return err;
-    };
+    // Clear any previous PTY for this stream (from a previous connection)
+    if (active_shells.fetchRemove(stream_id)) |kv| {
+        kv.value.deinit();
+        std.heap.page_allocator.destroy(kv.value);
+    }
 
-    std.debug.print("✓ Session started\n", .{});
+    var session_started = false;
+
+    // Loop to handle multiple channel requests (pty-req, then shell)
+    while (!session_started) {
+        // Poll to receive channel request packet
+        try server_conn.transport.poll(30000);
+
+        // Receive and handle the request
+        var buffer: [4096]u8 = undefined;
+        const len = try server_conn.transport.receiveFromStream(stream_id, &buffer);
+
+        // If no stream data yet (e.g., received ACK packet), continue polling
+        if (len == 0) {
+            continue;
+        }
+
+        const data = buffer[0..len];
+        std.debug.print("Received channel request ({} bytes)\n", .{len});
+
+        // Handle the request (shell, exec, or subsystem)
+        session_server.handleRequest(
+            stream_id,
+            data,
+            shellHandler,
+            execHandler,
+            subsystemHandler,
+        ) catch |err| {
+            std.debug.print("✗ Failed to handle request: {}\n", .{err});
+            return err;
+        };
+
+        // Check if this was a shell/exec/subsystem request (not just pty-req)
+        // Shell handler creates PTY and stores it in active_shells
+        const has_pty = active_shells.contains(stream_id);
+        std.debug.print("DEBUG: has_pty={}, session_started={}\n", .{ has_pty, session_started });
+
+        if (has_pty) {
+            session_started = true;
+            std.debug.print("✓ Session started\n", .{});
+        } else {
+            std.debug.print("DEBUG: No PTY yet, looping for next request...\n", .{});
+        }
+    }
 
     // Bridge I/O between PTY and SSH channel
     try bridgeSession(server_conn, stream_id);
@@ -1174,3 +1200,4 @@ fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![
 
     return blob;
 }
+// Clean build

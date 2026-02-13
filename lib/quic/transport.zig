@@ -137,17 +137,17 @@ pub const QuicTransport = struct {
             self.peer_address = src_addr;
         }
 
-        std.log.debug("Received UDP datagram: {} bytes", .{recv_len});
+        // std.log.debug("Received UDP datagram: {} bytes", .{recv_len});
 
         // Process packet (errors are logged and ignored to prevent crashes)
-        self.processPacket(packet_buffer[0..recv_len]) catch |err| {
-            std.log.debug("Packet processing failed: {}", .{err});
+        self.processPacket(packet_buffer[0..recv_len]) catch {
+            // Silently ignore packet processing errors
         };
     }
 
     /// Process received QUIC packet
     fn processPacket(self: *Self, data: []const u8) !void {
-        std.log.debug("Processing packet: {} bytes, first byte: 0x{x}", .{ data.len, if (data.len > 0) data[0] else 0 });
+        // std.log.debug("Processing packet: {} bytes, first byte: 0x{x}", .{ data.len, if (data.len > 0) data[0] else 0 });
 
         // Validate minimum packet size
         const conn_id_len = self.connection.remote_conn_id.len;
@@ -303,14 +303,14 @@ pub const QuicTransport = struct {
 
     /// Send a QUIC packet with given payload
     fn sendPacket(self: *Self, payload: []const u8) !void {
-        std.log.debug("Sending packet with payload: {} bytes", .{payload.len});
+        // std.log.debug("Sending packet with payload: {} bytes", .{payload.len});
 
         // Allocate packet buffer
         var packet_buffer: [2048]u8 = undefined;
 
         // Get packet number
         const pn = self.connection.nextPacketNumber();
-        std.log.debug("Packet number: {}, remote_conn_id: {s}", .{ pn, self.connection.remote_conn_id });
+        // std.log.debug("Packet number: {}, remote_conn_id: {s}", .{ pn, self.connection.remote_conn_id });
 
         // Create header
         const header = packet.ShortHeader{
@@ -336,7 +336,7 @@ pub const QuicTransport = struct {
 
         // Send UDP packet
         if (self.peer_address) |addr| {
-            std.log.debug("Sending {} bytes to peer", .{total_len});
+            // std.log.debug("Sending {} bytes to peer", .{total_len});
             const sent = try posix.sendto(
                 self.socket,
                 packet_buffer[0..total_len],

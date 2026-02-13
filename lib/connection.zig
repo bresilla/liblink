@@ -322,12 +322,22 @@ pub const ClientConnection = struct {
 
     /// Request shell on a session channel (convenience method)
     ///
-    /// Opens a session channel, requests a shell, and returns the channel.
+    /// Opens a session channel, requests a PTY, requests a shell, and returns the channel.
     pub fn requestShell(self: *Self) !channels.SessionChannel {
         var session = try self.openSession();
         errdefer session.close() catch {};
 
         try session.waitForConfirmation();
+
+        // Request PTY before shell for proper terminal support
+        try session.requestPty(
+            "xterm-256color", // TERM environment variable
+            80,  // width in characters
+            24,  // height in rows
+            0,   // width in pixels (0 = not specified)
+            0,   // height in pixels (0 = not specified)
+        );
+
         try session.requestShell();
 
         return session;
