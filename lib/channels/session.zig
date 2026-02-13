@@ -38,6 +38,9 @@ pub const SessionChannel = struct {
     ///
     /// Reads the CHANNEL_OPEN_CONFIRMATION message.
     pub fn waitForConfirmation(self: *Self) !void {
+        // Poll to receive the confirmation packet
+        try self.manager.transport.poll(30000); // 30 second timeout
+
         var buffer: [4096]u8 = undefined;
         const len = try self.manager.transport.receiveFromStream(self.stream_id, &buffer);
         const data = buffer[0..len];
@@ -137,6 +140,9 @@ pub const SessionChannel = struct {
 
     /// Wait for request response (success or failure)
     fn waitForRequestResponse(self: *Self) !void {
+        // Poll to receive the response packet
+        try self.manager.transport.poll(30000); // 30 second timeout
+
         var buffer: [4096]u8 = undefined;
         const len = try self.manager.transport.receiveFromStream(self.stream_id, &buffer);
         const data = buffer[0..len];

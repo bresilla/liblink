@@ -220,18 +220,24 @@ pub const QuicTransport = struct {
 
     /// Flush pending data - send all queued frames
     pub fn flush(self: *Self) !void {
+        std.log.info("FLUSH: Getting streams with data to send", .{});
         // Get streams with data to send
         const stream_ids = try self.connection.streamsWithDataToSend();
         defer self.allocator.free(stream_ids);
 
+        std.log.info("FLUSH: Found {} streams with data", .{stream_ids.len});
+
         // Send data from each stream
         for (stream_ids) |stream_id| {
+            std.log.info("FLUSH: Processing stream {}", .{stream_id});
             const stream = self.connection.getStream(stream_id).?;
 
             while (stream.hasDataToSend()) {
+                std.log.info("FLUSH: Getting data to send from stream {}", .{stream_id});
                 // Get data to send (up to 1200 bytes to fit in UDP packet)
                 const to_send = stream.dataToSend(1200) orelse break;
 
+                std.log.info("FLUSH: Creating STREAM frame for {} bytes", .{to_send.data.len});
                 // Create STREAM frame
                 const stream_frame = frame.StreamFrame{
                     .stream_id = stream_id,
@@ -240,22 +246,29 @@ pub const QuicTransport = struct {
                     .fin = false,
                 };
 
+                std.log.info("FLUSH: Encoding frame", .{});
                 // Encode frame
                 const frame_data = try stream_frame.encode(self.allocator);
                 defer self.allocator.free(frame_data);
 
+                std.log.info("FLUSH: Sending packet ({} bytes)", .{frame_data.len});
                 // Send packet
                 try self.sendPacket(frame_data);
 
+                std.log.info("FLUSH: Marking {} bytes as sent", .{to_send.data.len});
                 // Mark data as sent
                 try stream.markSent(to_send.data.len);
             }
         }
 
+        std.log.info("FLUSH: Checking if ACK needed", .{});
         // Send ACK if needed
         if (self.connection.needsAck()) {
+            std.log.info("FLUSH: Sending ACK", .{});
             try self.sendAck();
         }
+
+        std.log.info("FLUSH: Completed successfully", .{});
     }
 
     /// Send a QUIC packet with given payload

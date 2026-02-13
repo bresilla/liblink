@@ -53,21 +53,33 @@ pub const StreamFrame = struct {
     fin: bool = false,
 
     pub fn encode(self: StreamFrame, allocator: std.mem.Allocator) ![]u8 {
+        std.log.info("ENCODE: Starting encode for stream {}", .{self.stream_id});
+        std.log.info("ENCODE: self.data.len={}, self.offset={}, self.fin={}", .{ self.data.len, self.offset, self.fin });
+        std.log.info("ENCODE: self.data.ptr={*}", .{self.data.ptr});
+
         // Calculate size
+        std.log.info("ENCODE: Calculating size...", .{});
         var size: usize = 1; // Type byte
 
+        std.log.info("ENCODE: Adding stream_id size", .{});
         size += varIntSize(self.stream_id);
 
         const has_offset = self.offset > 0;
         if (has_offset) {
+            std.log.info("ENCODE: Adding offset size", .{});
             size += varIntSize(self.offset);
         }
 
+        std.log.info("ENCODE: Adding data.len size", .{});
         size += varIntSize(self.data.len); // Length always present for simplicity
         size += self.data.len;
 
+        std.log.info("ENCODE: Total size calculated: {}", .{size});
+
         // Allocate buffer
+        std.log.info("ENCODE: About to allocate buffer, size={}, allocator.ptr={*}", .{ size, &allocator });
         const buffer = try allocator.alloc(u8, size);
+        std.log.info("ENCODE: Buffer allocated successfully at {*}", .{buffer.ptr});
         errdefer allocator.free(buffer);
 
         var offset: usize = 0;
@@ -93,9 +105,18 @@ pub const StreamFrame = struct {
         offset += encodeVarInt(self.data.len, buffer[offset..]);
 
         // Data
+        std.log.info("ENCODE: About to memcpy {} bytes, offset={}, buffer.len={}", .{ self.data.len, offset, buffer.len });
+        std.log.info("ENCODE: self.data.ptr={*}, buffer.ptr={*}", .{ self.data.ptr, buffer.ptr });
+
+        if (offset + self.data.len > buffer.len) {
+            std.log.err("ENCODE: Buffer overflow! offset={}, data.len={}, buffer.len={}", .{ offset, self.data.len, buffer.len });
+            return error.BufferOverflow;
+        }
+
         @memcpy(buffer[offset .. offset + self.data.len], self.data);
         offset += self.data.len;
 
+        std.log.info("ENCODE: memcpy completed successfully", .{});
         return buffer[0..offset];
     }
 

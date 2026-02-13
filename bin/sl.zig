@@ -142,6 +142,96 @@ fn runServerCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
     }
 }
 
+/// Handle session channel and requests
+fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
+    const channels = @import("syslink").channels;
+
+    // Wait for client to open a session channel (stream 4)
+    std.debug.print("Waiting for session channel...\n", .{});
+
+    const stream_id: u64 = 4;
+
+    // Poll to receive CHANNEL_OPEN packet
+    try server_conn.transport.poll(30000);
+
+    // Accept the session channel on stream 4
+    try server_conn.channel_manager.acceptChannel(stream_id);
+    std.debug.print("✓ Session channel accepted on stream {}\n", .{stream_id});
+
+    // Wait for channel request (shell, exec, or subsystem)
+    std.debug.print("Waiting for channel request...\n", .{});
+
+    // Poll to receive channel request packet
+    try server_conn.transport.poll(30000);
+
+    // Receive and handle the request
+    var buffer: [4096]u8 = undefined;
+    const len = try server_conn.transport.receiveFromStream(stream_id, &buffer);
+    const data = buffer[0..len];
+
+    std.debug.print("Received channel request ({} bytes)\n", .{len});
+
+    var session_server = channels.SessionServer.init(server_conn.allocator, &server_conn.channel_manager);
+
+    // Handle the request (shell, exec, or subsystem)
+    session_server.handleRequest(
+        stream_id,
+        data,
+        shellHandler,
+        execHandler,
+        subsystemHandler,
+    ) catch |err| {
+        std.debug.print("✗ Failed to handle request: {}\n", .{err});
+        return err;
+    };
+
+    std.debug.print("✓ Session started\n", .{});
+
+    // Bridge I/O between PTY and SSH channel
+    try bridgeSession(server_conn, stream_id);
+}
+
+/// Active shell sessions (stream_id -> PTY)
+var active_shells = std.AutoHashMap(u64, *syslink.platform.pty.Pty).init(std.heap.page_allocator);
+
+/// Shell handler - called when client requests a shell
+fn shellHandler(stream_id: u64) !void {
+    std.debug.print("  → Shell requested on stream {}\n", .{stream_id});
+
+    const allocator = std.heap.page_allocator;
+
+    // Create PTY
+    const pty = try allocator.create(syslink.platform.pty.Pty);
+    errdefer allocator.destroy(pty);
+
+    pty.* = try syslink.platform.pty.Pty.create(allocator);
+    errdefer pty.deinit();
+
+    // Set terminal size (default 80x24)
+    try pty.setWindowSize(24, 80);
+
+    // Spawn shell
+    const pid = try syslink.platform.pty.spawnShell(pty, "user");
+    std.debug.print("  ✓ Spawned shell with PID {}\n", .{pid});
+
+    // Store PTY for this session
+    try active_shells.put(stream_id, pty);
+
+    std.debug.print("  ✓ Shell session ready on stream {}\n", .{stream_id});
+}
+
+/// Exec handler - called when client requests command execution
+fn execHandler(stream_id: u64, command: []const u8) !void {
+    std.debug.print("  → Exec requested on stream {}: {s}\n", .{ stream_id, command });
+    // TODO: Execute command and return output
+}
+
+/// Subsystem handler - called when client requests subsystem (e.g., sftp)
+fn subsystemHandler(stream_id: u64, subsystem_name: []const u8) !void {
+    std.debug.print("  → Subsystem requested on stream {}: {s}\n", .{ stream_id, subsystem_name });
+    // TODO: Start subsystem (e.g., SFTP server)
+}
+
 fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var listen_addr: []const u8 = "0.0.0.0";
     var listen_port: u16 = 2222;
@@ -298,7 +388,14 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         }
 
         std.debug.print("✓ Client authenticated\n", .{});
-        std.debug.print("Session active (limited demo - full session handling TODO)\n\n", .{});
+
+        // Handle session channels
+        handleSession(server_conn) catch |err| {
+            std.debug.print("✗ Session error: {}\n\n", .{err});
+            continue;
+        };
+
+        std.debug.print("Session ended\n\n", .{});
     }
 }
 

@@ -117,20 +117,28 @@ pub const ChannelManager = struct {
             stream_id,
         });
 
+        std.log.info("DEBUG: About to create ChannelInfo", .{});
         // Create channel info
         const info = try self.allocator.create(ChannelInfo);
         errdefer self.allocator.destroy(info);
 
+        std.log.info("DEBUG: About to dupe channel_type: {s}", .{open_msg.channel_type});
+        const channel_type_copy = try self.allocator.dupe(u8, open_msg.channel_type);
+        errdefer self.allocator.free(channel_type_copy);
+
+        std.log.info("DEBUG: Setting ChannelInfo fields", .{});
         info.* = ChannelInfo{
             .stream_id = stream_id,
-            .channel_type = try self.allocator.dupe(u8, open_msg.channel_type),
+            .channel_type = channel_type_copy,
             .state = .open, // Accepting means it's open
             .allocator = self.allocator,
         };
         errdefer info.deinit();
 
+        std.log.info("DEBUG: About to put in channels map", .{});
         try self.channels.put(stream_id, info);
 
+        std.log.info("DEBUG: Creating CHANNEL_OPEN_CONFIRMATION", .{});
         // Send CHANNEL_OPEN_CONFIRMATION
         const confirm_msg = channel_protocol.ChannelOpenConfirmation{
             .sender_channel = @intCast(stream_id),
@@ -139,10 +147,14 @@ pub const ChannelManager = struct {
             .type_specific_data = "",
         };
 
+        std.log.info("DEBUG: Encoding confirmation message", .{});
         const encoded = try confirm_msg.encode(self.allocator);
         defer self.allocator.free(encoded);
 
+        std.log.info("DEBUG: Sending confirmation on stream {}", .{stream_id});
         try self.transport.sendOnStream(stream_id, encoded);
+
+        std.log.info("DEBUG: acceptChannel completed successfully", .{});
     }
 
     /// Process CHANNEL_OPEN_CONFIRMATION (client-side)

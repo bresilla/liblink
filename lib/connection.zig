@@ -657,9 +657,6 @@ pub const ConnectionListener = struct {
         @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
         transport.peer_address = client_storage;
 
-        // Initialize channel manager
-        const channel_manager = channels.ChannelManager.init(self.allocator, &transport, true);
-
         // Allocate and track the connection
         const conn = try self.allocator.create(ServerConnection);
         errdefer self.allocator.destroy(conn);
@@ -668,8 +665,11 @@ pub const ConnectionListener = struct {
             .allocator = self.allocator,
             .transport = transport,
             .kex = kex,
-            .channel_manager = channel_manager,
+            .channel_manager = undefined, // Initialize after transport is in place
         };
+
+        // Initialize channel manager with pointer to conn.transport (not local variable!)
+        conn.channel_manager = channels.ChannelManager.init(self.allocator, &conn.transport, true);
 
         try self.active_connections.append(self.allocator, conn);
 

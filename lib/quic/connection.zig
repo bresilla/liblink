@@ -38,10 +38,22 @@ pub const Connection = struct {
         // Server channel streams: 5, 9, 13... (bidirectional, server-initiated)
         const initial_stream_id: u64 = if (is_server) 5 else 4;
 
+        var streams = std.AutoHashMap(u64, *Stream).init(allocator);
+        errdefer streams.deinit();
+
+        // Pre-create stream 0 for authentication (both client and server need it)
+        const stream0 = try allocator.create(Stream);
+        errdefer allocator.destroy(stream0);
+
+        stream0.* = try Stream.init(allocator, 0);
+        errdefer stream0.deinit();
+
+        try streams.put(0, stream0);
+
         return Self{
             .allocator = allocator,
             .is_server = is_server,
-            .streams = std.AutoHashMap(u64, *Stream).init(allocator),
+            .streams = streams,
             .next_stream_id = initial_stream_id,
             .next_packet_number = 0,
             .largest_received_packet = 0,
