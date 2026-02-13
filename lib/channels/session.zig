@@ -140,31 +140,39 @@ pub const SessionChannel = struct {
 
     /// Wait for request response (success or failure)
     fn waitForRequestResponse(self: *Self) !void {
-        // Poll to receive the response packet
-        try self.manager.transport.poll(30000); // 30 second timeout
-
         var buffer: [4096]u8 = undefined;
-        const len = try self.manager.transport.receiveFromStream(self.stream_id, &buffer);
-        const data = buffer[0..len];
 
-        if (data.len < 1) {
-            return error.InvalidResponse;
+        // Poll multiple times until we receive data
+        var attempts: u32 = 0;
+        while (attempts < 100) : (attempts += 1) {
+            // Poll to receive packets
+            self.manager.transport.poll(100) catch {}; // 100ms timeout
+
+            // Try to read from stream
+            const len = self.manager.transport.receiveFromStream(self.stream_id, &buffer) catch 0;
+
+            if (len > 0) {
+                const data = buffer[0..len];
+                const msg_type = data[0];
+
+                switch (msg_type) {
+                    99 => { // SSH_MSG_CHANNEL_SUCCESS
+                        std.log.info("Channel request succeeded", .{});
+                        return;
+                    },
+                    100 => { // SSH_MSG_CHANNEL_FAILURE
+                        std.log.err("Channel request failed", .{});
+                        return error.ChannelRequestFailed;
+                    },
+                    else => {
+                        std.log.err("Unexpected message type: {}", .{msg_type});
+                        return error.UnexpectedMessageType;
+                    },
+                }
+            }
         }
 
-        const msg_type = data[0];
-        switch (msg_type) {
-            99 => { // SSH_MSG_CHANNEL_SUCCESS
-                std.log.info("Channel request succeeded", .{});
-            },
-            100 => { // SSH_MSG_CHANNEL_FAILURE
-                std.log.err("Channel request failed", .{});
-                return error.ChannelRequestFailed;
-            },
-            else => {
-                std.log.err("Unexpected message type: {}", .{msg_type});
-                return error.UnexpectedMessageType;
-            },
-        }
+        return error.InvalidResponse; // Timeout after 10 seconds
     }
 
     /// Send data on the session channel

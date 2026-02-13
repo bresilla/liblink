@@ -19,12 +19,12 @@ pub const Stream = struct {
     state: StreamState,
 
     // Send side
-    send_buffer: std.ArrayList(u8),
+    send_buffer: std.ArrayListAligned(u8, null),
     send_offset: u64, // Next byte to send
     send_max: u64, // MAX_STREAM_DATA from peer (flow control limit)
 
     // Receive side
-    recv_buffer: std.ArrayList(u8),
+    recv_buffer: std.ArrayListAligned(u8, null),
     recv_offset: u64, // Next byte expected
     recv_max: u64, // Our MAX_STREAM_DATA to advertise
 
@@ -39,10 +39,10 @@ pub const Stream = struct {
             .allocator = allocator,
             .stream_id = stream_id,
             .state = .open,
-            .send_buffer = std.ArrayList(u8){},
+            .send_buffer = .{},
             .send_offset = 0,
             .send_max = 1024 * 1024, // Default 1MB flow control limit
-            .recv_buffer = std.ArrayList(u8){},
+            .recv_buffer = .{},
             .recv_offset = 0,
             .recv_max = 1024 * 1024, // Default 1MB
             .recv_chunks = std.AutoHashMap(u64, []u8).init(allocator),

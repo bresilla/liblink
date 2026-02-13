@@ -58,7 +58,7 @@ pub const ServerConfig = struct {
 /// Active SSH/QUIC client connection
 pub const ClientConnection = struct {
     allocator: Allocator,
-    transport: quic.QuicTransport,
+    transport: *quic.QuicTransport,
     kex: kex_exchange.ClientKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -114,7 +114,15 @@ pub const ClientConnection = struct {
         const local_conn_id = "client-conn-id";
         const remote_conn_id = "server-conn-id";
 
-        var transport = try quic.QuicTransport.init(
+        // Prepare server address for client to send packets to
+        var server_storage: std.posix.sockaddr.storage = undefined;
+        const server_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&udp_transport.socket.address.any);
+        @memcpy(std.mem.asBytes(&server_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(server_sockaddr_ptr));
+
+        const transport = try allocator.create(quic.QuicTransport);
+        errdefer allocator.destroy(transport);
+
+        transport.* = try quic.QuicTransport.init(
             allocator,
             udp_transport.socket.socket, // Reuse UDP socket
             local_conn_id,
@@ -122,19 +130,15 @@ pub const ClientConnection = struct {
             secrets.client_secret,
             secrets.server_secret,
             false, // client mode
+            server_storage, // Set peer address for client
         );
         errdefer transport.deinit();
 
-        // Set server address for client to send packets to
-        var server_storage: std.posix.sockaddr.storage = undefined;
-        const server_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&udp_transport.socket.address.any);
-        @memcpy(std.mem.asBytes(&server_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(server_sockaddr_ptr));
-        transport.peer_address = server_storage;
 
         std.log.info("SSH/QUIC connection established", .{});
 
-        // Initialize channel manager
-        const channel_manager = channels.ChannelManager.init(allocator, &transport, false);
+        // Initialize channel manager with pointer to heap-allocated transport
+        const channel_manager = channels.ChannelManager.init(allocator, transport, false);
 
         return Self{
             .allocator = allocator,
@@ -147,6 +151,7 @@ pub const ClientConnection = struct {
     pub fn deinit(self: *Self) void {
         self.channel_manager.deinit();
         self.transport.deinit();
+        self.allocator.destroy(self.transport);
         self.kex.deinit();
     }
 
@@ -640,6 +645,11 @@ pub const ConnectionListener = struct {
         // Set client address for server socket (for sendto)
         self.udp_transport.socket.address = init_result.client_address;
 
+        // Prepare client address for server transport (convert Address to sockaddr.storage)
+        var client_storage: std.posix.sockaddr.storage = undefined;
+        const client_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&init_result.client_address.any);
+        @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
+
         var transport = try quic.QuicTransport.init(
             self.allocator,
             self.udp_transport.socket.socket, // Reuse UDP socket
@@ -648,14 +658,10 @@ pub const ConnectionListener = struct {
             result.client_secret,
             result.server_secret,
             true, // server mode
+            client_storage, // Set peer address for server
         );
         errdefer transport.deinit();
 
-        // Store client address in transport (convert Address to sockaddr.storage)
-        var client_storage: std.posix.sockaddr.storage = undefined;
-        const client_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&init_result.client_address.any);
-        @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
-        transport.peer_address = client_storage;
 
         // Allocate and track the connection
         const conn = try self.allocator.create(ServerConnection);

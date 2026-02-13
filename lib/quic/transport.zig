@@ -14,7 +14,7 @@ const PacketProtection = @import("crypto.zig").PacketProtection;
 pub const QuicTransport = struct {
     allocator: Allocator,
     socket: posix.socket_t,
-    connection: Connection,
+    connection: *Connection,
     crypto: PacketProtection,
     is_server: bool,
 
@@ -28,6 +28,7 @@ pub const QuicTransport = struct {
     ///
     /// socket: UDP socket (from key exchange or newly created)
     /// client_secret/server_secret: From SSH key exchange
+    /// peer_addr: Optional peer address (required for clients)
     pub fn init(
         allocator: Allocator,
         socket: posix.socket_t,
@@ -36,8 +37,12 @@ pub const QuicTransport = struct {
         client_secret: [32]u8,
         server_secret: [32]u8,
         is_server: bool,
+        peer_addr: ?posix.sockaddr.storage,
     ) !Self {
-        var connection = try Connection.init(
+        const connection = try allocator.create(Connection);
+        errdefer allocator.destroy(connection);
+
+        connection.* = try Connection.init(
             allocator,
             local_conn_id,
             remote_conn_id,
@@ -53,11 +58,13 @@ pub const QuicTransport = struct {
             .connection = connection,
             .crypto = crypto,
             .is_server = is_server,
+            .peer_address = peer_addr,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.connection.deinit();
+        self.allocator.destroy(self.connection);
         // Note: socket is NOT closed here - caller owns it
     }
 
@@ -130,19 +137,30 @@ pub const QuicTransport = struct {
             self.peer_address = src_addr;
         }
 
-        // Process packet
-        try self.processPacket(packet_buffer[0..recv_len]);
+        std.log.debug("Received UDP datagram: {} bytes", .{recv_len});
+
+        // Process packet (errors are logged and ignored to prevent crashes)
+        self.processPacket(packet_buffer[0..recv_len]) catch |err| {
+            std.log.debug("Packet processing failed: {}", .{err});
+        };
     }
 
     /// Process received QUIC packet
     fn processPacket(self: *Self, data: []const u8) !void {
         std.log.debug("Processing packet: {} bytes, first byte: 0x{x}", .{ data.len, if (data.len > 0) data[0] else 0 });
 
-        // Parse packet header
+        // Validate minimum packet size
         const conn_id_len = self.connection.remote_conn_id.len;
+        const min_packet_size = 1 + conn_id_len + 1 + 16; // flags + conn_id + pn + min_payload+tag
+        if (data.len < min_packet_size) {
+            std.log.warn("Ignoring packet that's too small: {} bytes (need at least {})", .{ data.len, min_packet_size });
+            return; // Silently ignore malformed packets
+        }
+
+        // Parse packet header
         const header_result = packet.ShortHeader.decode(data, conn_id_len) catch |err| {
-            std.log.err("Failed to decode packet header: {}, first bytes: {any}", .{ err, data[0..@min(16, data.len)] });
-            return err;
+            std.log.warn("Ignoring malformed packet: {}, size: {}, first bytes: {any}", .{ err, data.len, data[0..@min(16, data.len)] });
+            return; // Silently ignore - don't crash on bad packets
         };
         const header = header_result.header;
         const header_len = header_result.consumed;
@@ -153,13 +171,22 @@ pub const QuicTransport = struct {
         // Extract ciphertext (everything after header)
         const ciphertext = data[header_len..];
 
+        // Validate ciphertext size (must have at least 16-byte auth tag)
+        if (ciphertext.len < 16) {
+            std.log.warn("Ignoring packet with invalid ciphertext size: {}", .{ciphertext.len});
+            return;
+        }
+
         // Decrypt payload
-        const payload = try self.crypto.decryptPacket(
+        const payload = self.crypto.decryptPacket(
             header.packet_number,
             data[0..header_len], // header as AAD
             ciphertext,
             self.allocator,
-        );
+        ) catch |err| {
+            std.log.warn("Failed to decrypt packet {}: {}", .{ header.packet_number, err });
+            return; // Ignore packets that fail authentication
+        };
         defer self.allocator.free(payload);
 
         // Parse and process frames
@@ -168,24 +195,40 @@ pub const QuicTransport = struct {
 
     /// Process QUIC frames from decrypted payload
     fn processFrames(self: *Self, payload: []const u8) !void {
+        if (payload.len == 0) {
+            std.log.debug("Empty payload, nothing to process", .{});
+            return;
+        }
+
         const offset: usize = 0;
 
         while (offset < payload.len) {
-            const frame_type = try frame.FrameType.decode(payload[offset..]);
+            const frame_type = frame.FrameType.decode(payload[offset..]) catch |err| {
+                std.log.warn("Failed to decode frame type: {}, payload size: {}", .{ err, payload.len });
+                return; // Stop processing on malformed frame
+            };
 
             switch (frame_type) {
                 .stream => {
-                    const stream_frame = try frame.StreamFrame.decode(
+                    const stream_frame = frame.StreamFrame.decode(
                         self.allocator,
                         payload[offset..],
-                    );
+                    ) catch |err| {
+                        std.log.warn("Failed to decode stream frame: {}", .{err});
+                        return; // Stop processing on malformed frame
+                    };
                     defer self.allocator.free(stream_frame.data);
 
                     // Get or create stream
-                    const stream = try self.connection.getOrCreateStream(stream_frame.stream_id);
+                    const stream = self.connection.getOrCreateStream(stream_frame.stream_id) catch |err| {
+                        std.log.warn("Failed to get/create stream {}: {}", .{ stream_frame.stream_id, err });
+                        return;
+                    };
 
                     // Deliver data
-                    try stream.receiveData(stream_frame.offset, stream_frame.data);
+                    stream.receiveData(stream_frame.offset, stream_frame.data) catch |err| {
+                        std.log.warn("Failed to deliver data to stream {}: {}", .{ stream_frame.stream_id, err });
+                    };
 
                     // Handle FIN
                     if (stream_frame.fin) {
@@ -220,24 +263,18 @@ pub const QuicTransport = struct {
 
     /// Flush pending data - send all queued frames
     pub fn flush(self: *Self) !void {
-        std.log.info("FLUSH: Getting streams with data to send", .{});
         // Get streams with data to send
         const stream_ids = try self.connection.streamsWithDataToSend();
         defer self.allocator.free(stream_ids);
 
-        std.log.info("FLUSH: Found {} streams with data", .{stream_ids.len});
-
         // Send data from each stream
         for (stream_ids) |stream_id| {
-            std.log.info("FLUSH: Processing stream {}", .{stream_id});
             const stream = self.connection.getStream(stream_id).?;
 
             while (stream.hasDataToSend()) {
-                std.log.info("FLUSH: Getting data to send from stream {}", .{stream_id});
                 // Get data to send (up to 1200 bytes to fit in UDP packet)
                 const to_send = stream.dataToSend(1200) orelse break;
 
-                std.log.info("FLUSH: Creating STREAM frame for {} bytes", .{to_send.data.len});
                 // Create STREAM frame
                 const stream_frame = frame.StreamFrame{
                     .stream_id = stream_id,
@@ -246,29 +283,22 @@ pub const QuicTransport = struct {
                     .fin = false,
                 };
 
-                std.log.info("FLUSH: Encoding frame", .{});
                 // Encode frame
                 const frame_data = try stream_frame.encode(self.allocator);
                 defer self.allocator.free(frame_data);
 
-                std.log.info("FLUSH: Sending packet ({} bytes)", .{frame_data.len});
                 // Send packet
                 try self.sendPacket(frame_data);
 
-                std.log.info("FLUSH: Marking {} bytes as sent", .{to_send.data.len});
                 // Mark data as sent
                 try stream.markSent(to_send.data.len);
             }
         }
 
-        std.log.info("FLUSH: Checking if ACK needed", .{});
         // Send ACK if needed
         if (self.connection.needsAck()) {
-            std.log.info("FLUSH: Sending ACK", .{});
             try self.sendAck();
         }
-
-        std.log.info("FLUSH: Completed successfully", .{});
     }
 
     /// Send a QUIC packet with given payload
@@ -369,6 +399,7 @@ test "QuicTransport - basic initialization" {
         client_secret,
         server_secret,
         false, // client
+        null, // no peer address for test
     );
     defer transport.deinit();
 

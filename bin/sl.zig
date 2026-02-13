@@ -534,21 +534,46 @@ fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
-        std.debug.print("Usage: sl shell [user@]host[:port]\n", .{});
+        std.debug.print("Usage: sl shell [options] [user@]host[:port]\n", .{});
+        std.debug.print("Options:\n", .{});
+        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.process.exit(1);
     }
 
-    const host_arg = args[0];
+    // Parse options
+    var password_arg: ?[]const u8 = null;
+    var host_arg: ?[]const u8 = null;
 
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -p requires a password argument\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            password_arg = args[i];
+        } else if (arg[0] != '-') {
+            host_arg = arg;
+        }
+    }
+
+    if (host_arg == null) {
+        std.debug.print("Error: Host required\n", .{});
+        std.process.exit(1);
+    }
+
+    const host = host_arg.?;
     var username: []const u8 = "root";
     var hostname: []const u8 = undefined;
     var port: u16 = 2222;
 
-    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
-        username = host_arg[0..at_pos];
-        hostname = host_arg[at_pos + 1 ..];
+    if (std.mem.indexOf(u8, host, "@")) |at_pos| {
+        username = host[0..at_pos];
+        hostname = host[at_pos + 1 ..];
     } else {
-        hostname = host_arg;
+        hostname = host;
     }
 
     if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
@@ -576,8 +601,14 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     std.debug.print("✓ Connected\n", .{});
 
-    const password = try getPassword(allocator, "Password: ");
-    defer allocator.free(password);
+    // Get password (from argument or prompt)
+    const password_owned = if (password_arg == null)
+        try getPassword(allocator, "Password: ")
+    else
+        null;
+    defer if (password_owned) |pw| allocator.free(pw);
+
+    const password = password_arg orelse password_owned.?;
 
     const auth_success = conn.authenticatePassword(username, password) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
@@ -606,48 +637,92 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    while (true) {
-        var line_buffer: [4096]u8 = undefined;
-        var byte_buffer: [1]u8 = undefined;
-        var line_len: usize = 0;
+    // Make stdin non-blocking
+    const stdin_flags = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.GETFL, 0) catch 0;
+    _ = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.SETFL, stdin_flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }))) catch {};
 
-        while (true) {
-            const n = stdin.read(&byte_buffer) catch |err| {
-                if (err == error.EOF or err == error.EndOfStream) return;
-                return err;
-            };
-            if (n == 0) return;
-            if (byte_buffer[0] == '\n') break;
-            if (line_len >= line_buffer.len) return error.LineTooLong;
-            line_buffer[line_len] = byte_buffer[0];
-            line_len += 1;
+    var input_buffer: [4096]u8 = undefined;
+    var input_len: usize = 0;
+    var running = true;
+
+    // Main I/O loop - poll both directions
+    while (running) {
+        // Poll for server data
+        session.manager.transport.poll(50) catch {}; // 50ms timeout
+
+        // Check for server output
+        if (session.receiveData()) |data| {
+            defer allocator.free(data);
+            stdout.writeAll(data) catch {};
+        } else |err| {
+            // Ignore NoData/EndOfBuffer errors (normal when no data available)
+            if (err != error.EndOfBuffer and err != error.NoData) {
+                std.debug.print("\nError receiving data: {}\n", .{err});
+            }
         }
 
-        const line = line_buffer[0..line_len];
-
-        if (std.mem.eql(u8, std.mem.trim(u8, line, &std.ascii.whitespace), "exit")) {
-            break;
-        }
-
-        var command_buffer: [4097]u8 = undefined;
-        @memcpy(command_buffer[0..line.len], line);
-        command_buffer[line.len] = '\n';
-        const command_with_newline = command_buffer[0 .. line.len + 1];
-
-        try session.sendData(command_with_newline);
-
-        const response = session.receiveData() catch |err| {
-            var err_buf: [256]u8 = undefined;
-            const err_msg = try std.fmt.bufPrint(&err_buf, "Error receiving data: {}\n", .{err});
-            try stdout.writeAll(err_msg);
-            continue;
+        // Check for user input (non-blocking)
+        var byte: [1]u8 = undefined;
+        const n: usize = stdin.read(&byte) catch |err| blk: {
+            if (err == error.WouldBlock) break :blk 0;
+            if (err == error.EOF or err == error.EndOfStream) {
+                running = false;
+                break :blk 0;
+            }
+            return err;
         };
-        defer allocator.free(response);
 
-        try stdout.writeAll(response);
+        if (n > 0) {
+            const ch = byte[0];
+
+            // Handle backspace
+            if (ch == 127 or ch == 8) {
+                if (input_len > 0) {
+                    input_len -= 1;
+                    stdout.writeAll("\x08 \x08") catch {};
+                }
+                continue;
+            }
+
+            // Echo character
+            stdout.writeAll(&byte) catch {};
+
+            // Add to buffer
+            if (input_len < input_buffer.len) {
+                input_buffer[input_len] = ch;
+                input_len += 1;
+            }
+
+            // Send on newline
+            if (ch == '\n') {
+                const line = input_buffer[0..input_len];
+
+                // Check for exit
+                if (input_len > 1) {
+                    const trimmed = std.mem.trim(u8, line[0 .. input_len - 1], &std.ascii.whitespace);
+                    if (std.mem.eql(u8, trimmed, "exit")) {
+                        running = false;
+                        input_len = 0;
+                        continue;
+                    }
+                }
+
+                // Send to server
+                session.sendData(line) catch |err| {
+                    std.debug.print("\nError sending data: {}\n", .{err});
+                };
+                input_len = 0;
+            }
+        }
+
+        // Small delay to avoid busy-waiting
+        std.Thread.sleep(10 * std.time.ns_per_ms);
     }
 
-    try stdout.writeAll("\nClosing shell...\n");
+    // Restore stdin to blocking mode
+    _ = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.SETFL, stdin_flags) catch {};
+
+    stdout.writeAll("\nClosing shell...\n") catch {};
 }
 
 fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
