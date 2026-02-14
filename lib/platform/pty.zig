@@ -143,22 +143,36 @@ fn childSetup(pty: *Pty, env: ShellEnv) !void {
     // Close master fd (child doesn't need it)
     posix.close(pty.master_fd);
 
-    // Set environment variables before exec
+    // Set environment variables (same as SSH does)
     _ = setenv("TERM", env.term, 1);
     _ = setenv("HOME", env.home, 1);
     _ = setenv("SHELL", env.shell, 1);
     _ = setenv("USER", env.user, 1);
     _ = setenv("LOGNAME", env.logname, 1);
-    _ = setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
+    _ = setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
 
-    // Execute shell
+    // SSH runs a LOGIN shell for PTY sessions (argv[0] starts with '-')
+    // This is shell-agnostic - works for bash, zsh, fish, etc.
+    // Example: "/bin/zsh" -> argv[0] = "-zsh", "/bin/bash" -> argv[0] = "-bash"
+    const shell_path = std.mem.span(env.shell);
+    const basename_start = if (std.mem.lastIndexOfScalar(u8, shell_path, '/')) |idx|
+        idx + 1
+    else
+        0;
+    const basename = shell_path[basename_start..];
+
+    // Create login shell name by prefixing basename with '-'
+    var login_name_buf: [256]u8 = undefined;
+    login_name_buf[0] = '-';
+    @memcpy(login_name_buf[1 .. 1 + basename.len], basename);
+    login_name_buf[1 + basename.len] = 0;
+
     const argv = [_:null]?[*:0]const u8{
-        env.shell,
-        "-i", // Interactive
+        @ptrCast(&login_name_buf), // argv[0] = "-{shell}" (login shell)
         null,
     };
 
-    // exec never returns on success (environ is already set by setenv calls above)
+    // exec never returns on success
     const err = posix.execveZ(env.shell, &argv, @ptrCast(environ));
     return err;
 }

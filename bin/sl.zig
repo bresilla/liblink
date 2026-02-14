@@ -13,6 +13,15 @@ const c = @cImport({
 
 const VERSION = "0.1.0";
 
+// Global flag for signal handling
+var should_exit = std.atomic.Value(bool).init(false);
+
+/// Signal handler for Ctrl+C
+fn handleSigInt(sig: c_int) callconv(.c) void {
+    _ = sig;
+    should_exit.store(true, .release);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -255,12 +264,16 @@ const PtyRequestInfo = struct {
     }
 };
 
-/// PTY session wrapper that tracks its allocator
+/// PTY session wrapper that tracks its allocator and child PID
 const PtySession = struct {
     pty: *syslink.platform.pty.Pty,
+    pid: std.posix.pid_t,
     allocator: std.mem.Allocator,
 
     fn deinit(self: *PtySession) void {
+        // Wait for child process to avoid zombies
+        _ = std.posix.waitpid(self.pid, 0);
+
         self.pty.deinit();
         self.allocator.destroy(self.pty);
     }
@@ -318,7 +331,10 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
                 // No data available, continue polling
                 continue;
             }
-            std.debug.print("PTY read error: {}\n", .{err});
+            // PTY error (e.g., shell exited) - send EOF and close channel
+            std.debug.print("PTY read error (shell likely exited): {}\n", .{err});
+            server_conn.channel_manager.sendEof(stream_id) catch {};
+            server_conn.channel_manager.closeChannel(stream_id) catch {};
             break;
         };
 
@@ -329,6 +345,10 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
     }
 
     std.debug.print("Session ended for stream {}\n", .{stream_id});
+
+    // Send EOF and close the channel to notify client
+    server_conn.channel_manager.sendEof(stream_id) catch {};
+    server_conn.channel_manager.closeChannel(stream_id) catch {};
 
     // Clean up PTY session
     if (active_shells.fetchRemove(stream_id)) |entry| {
@@ -415,6 +435,7 @@ fn shellHandler(stream_id: u64) !void {
     // Store PTY session for this stream
     try active_shells.put(stream_id, .{
         .pty = pty,
+        .pid = pid,
         .allocator = allocator,
     });
 
@@ -531,6 +552,11 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (err == error.WouldBlock) {
                 // No connection ready, wait before trying again
                 std.Thread.sleep(100 * std.time.ns_per_ms);
+                continue;
+            }
+            // PacketTooSmall often happens during connection teardown (cleanup packets)
+            // These are benign and can be safely ignored
+            if (err == error.PacketTooSmall) {
                 continue;
             }
             std.debug.print("✗ Failed to accept connection: {}\n\n", .{err});
@@ -821,6 +847,14 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     };
     defer restoreTerminalMode(&original_termios);
 
+    // Set up signal handler for clean exit on Ctrl+C
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigInt },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+
     try runShellInteractive(allocator, &session);
 }
 
@@ -834,6 +868,12 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
 
     // Optimized I/O loop for low latency
     while (running) {
+        // Check if user pressed Ctrl+C
+        if (should_exit.load(.acquire)) {
+            std.debug.print("\r\n[Interrupted by user]\r\n", .{});
+            break;
+        }
+
         // Poll with minimal timeout (1ms)
         session.manager.transport.poll(1) catch {};
 
@@ -850,7 +890,7 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
         // Forward stdin to server
         if (stdin_len > 0) {
             session.sendData(stdin_buffer[0..stdin_len]) catch |err| {
-                std.debug.print("\nError sending data: {}\n", .{err});
+                std.debug.print("\r\nError sending data: {}\r\n", .{err});
                 running = false;
                 continue;
             };
@@ -861,9 +901,12 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
             defer session.manager.allocator.free(data);
             stdout.writeAll(data) catch {};
         } else |err| {
-            // Ignore NoData/EndOfBuffer errors (normal when no data available)
-            if (err != error.EndOfBuffer and err != error.NoData) {
-                // Connection closed or error
+            // EOF or connection closed
+            if (err == error.InvalidMessageType) {
+                // Might be EOF message - check and exit gracefully
+                running = false;
+            } else if (err != error.NoData and err != error.EndOfBuffer) {
+                // Real error - exit
                 running = false;
             }
         }
