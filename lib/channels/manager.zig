@@ -57,15 +57,9 @@ pub const ChannelManager = struct {
         maximum_packet_size: u32,
         type_specific_data: []const u8,
     ) !u64 {
-        // Allocate next client stream ID
-        const stream_id = self.next_client_stream_id;
-        self.next_client_stream_id += 4; // Next client bidirectional stream
-
-        // Open the QUIC stream
-        const opened_stream = try self.transport.openStream();
-        if (opened_stream != stream_id) {
-            std.log.warn("Stream ID mismatch: expected {}, got {}", .{ stream_id, opened_stream });
-        }
+        // Open the QUIC stream and use its assigned ID
+        const stream_id = try self.transport.openStream();
+        self.next_client_stream_id = stream_id + 4; // Update to next expected stream
 
         // Create channel info
         const info = try self.allocator.create(ChannelInfo);

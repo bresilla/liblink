@@ -323,7 +323,7 @@ pub const ClientConnection = struct {
     /// Request shell on a session channel (convenience method)
     ///
     /// Opens a session channel, requests a PTY, requests a shell, and returns the channel.
-    pub fn requestShell(self: *Self) !channels.SessionChannel {
+    pub fn requestShell(self: *Self, term_cols: u32, term_rows: u32) !channels.SessionChannel {
         var session = try self.openSession();
         errdefer session.close() catch {};
 
@@ -332,8 +332,8 @@ pub const ClientConnection = struct {
         // Request PTY before shell for proper terminal support
         try session.requestPty(
             "xterm-256color", // TERM environment variable
-            80,  // width in characters
-            24,  // height in rows
+            term_cols,  // width in characters (from client terminal)
+            term_rows,  // height in rows (from client terminal)
             0,   // width in pixels (0 = not specified)
             0,   // height in pixels (0 = not specified)
         );
@@ -620,13 +620,11 @@ pub const ConnectionListener = struct {
             return error.ServerShutdown;
         }
 
-        std.log.info("Waiting for client connection...", .{});
-
-        // Receive SSH_QUIC_INIT from client
+        // Receive SSH_QUIC_INIT from client (may return WouldBlock if no data ready)
         const init_result = try self.udp_transport.receiveInit();
         defer self.allocator.free(init_result.init_data);
 
-        std.log.info("Received init from client, processing...", .{});
+        std.log.info("Received connection from {any}", .{init_result.client_address});
 
         // Initialize server key exchange
         var kex = kex_exchange.ServerKeyExchange.init(self.allocator, self.config.random);

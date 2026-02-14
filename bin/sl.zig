@@ -2,6 +2,15 @@ const std = @import("std");
 const syslink = @import("syslink");
 const builtin = @import("builtin");
 
+const c = @cImport({
+    @cInclude("pwd.h");
+    @cInclude("unistd.h");
+    @cInclude("string.h");
+    @cInclude("sys/ioctl.h");
+    @cInclude("termios.h");
+    @cInclude("poll.h");
+});
+
 const VERSION = "0.1.0";
 
 pub fn main() !void {
@@ -146,16 +155,32 @@ fn runServerCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
 fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
     const channels = @import("syslink").channels;
 
-    // Wait for client to open a session channel (stream 4)
+    // Wait for client to open a session channel
     std.debug.print("Waiting for session channel...\n", .{});
-
-    const stream_id: u64 = 4;
 
     // Poll to receive CHANNEL_OPEN packet
     try server_conn.transport.poll(30000);
 
-    // Accept the session channel on stream 4
-    try server_conn.channel_manager.acceptChannel(stream_id);
+    // Discover which stream the client opened (try 4, 8, 12, 16...)
+    var stream_id: u64 = 0;
+    var found = false;
+    var test_stream: u64 = 4;
+    while (test_stream < 24) : (test_stream += 4) {
+        // Try to accept on this stream
+        server_conn.channel_manager.acceptChannel(test_stream) catch {
+            // Stream not available, try next one
+            continue;
+        };
+        // Success! Found the stream
+        stream_id = test_stream;
+        found = true;
+        break;
+    }
+
+    if (!found) {
+        return error.NoSessionChannel;
+    }
+
     std.debug.print("✓ Session channel accepted on stream {}\n", .{stream_id});
 
     // Wait for channel requests (may receive pty-req, then shell/exec/subsystem)
@@ -165,8 +190,8 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
 
     // Clear any previous PTY for this stream (from a previous connection)
     if (active_shells.fetchRemove(stream_id)) |kv| {
-        kv.value.deinit();
-        std.heap.page_allocator.destroy(kv.value);
+        var old_session = kv.value;
+        old_session.deinit();
     }
 
     var session_started = false;
@@ -186,12 +211,12 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
         }
 
         const data = buffer[0..len];
-        std.debug.print("Received channel request ({} bytes)\n", .{len});
 
         // Handle the request (shell, exec, or subsystem)
         session_server.handleRequest(
             stream_id,
             data,
+            ptyHandler,
             shellHandler,
             execHandler,
             subsystemHandler,
@@ -203,13 +228,10 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
         // Check if this was a shell/exec/subsystem request (not just pty-req)
         // Shell handler creates PTY and stores it in active_shells
         const has_pty = active_shells.contains(stream_id);
-        std.debug.print("DEBUG: has_pty={}, session_started={}\n", .{ has_pty, session_started });
 
         if (has_pty) {
             session_started = true;
             std.debug.print("✓ Session started\n", .{});
-        } else {
-            std.debug.print("DEBUG: No PTY yet, looping for next request...\n", .{});
         }
     }
 
@@ -217,32 +239,63 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
     try bridgeSession(server_conn, stream_id);
 }
 
-/// Active shell sessions (stream_id -> PTY)
-var active_shells = std.AutoHashMap(u64, *syslink.platform.pty.Pty).init(std.heap.page_allocator);
+/// PTY request information
+const PtyRequestInfo = struct {
+    term: []const u8,
+    width_chars: u32,
+    height_rows: u32,
+    width_pixels: u32,
+    height_pixels: u32,
+    modes: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *PtyRequestInfo) void {
+        self.allocator.free(self.term);
+        self.allocator.free(self.modes);
+    }
+};
+
+/// PTY session wrapper that tracks its allocator
+const PtySession = struct {
+    pty: *syslink.platform.pty.Pty,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *PtySession) void {
+        self.pty.deinit();
+        self.allocator.destroy(self.pty);
+    }
+};
+
+/// Active shell sessions (stream_id -> PtySession)
+var active_shells = std.AutoHashMap(u64, PtySession).init(std.heap.page_allocator);
+
+/// PTY request info for each session (stream_id -> PtyRequestInfo)
+var pty_requests = std.AutoHashMap(u64, PtyRequestInfo).init(std.heap.page_allocator);
 
 /// Bridge I/O between PTY and SSH channel
 fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u64) !void {
-    const pty = active_shells.get(stream_id) orelse return error.NoPtyForSession;
+    const session = active_shells.get(stream_id) orelse return error.NoPtyForSession;
+    const pty = session.pty;
 
     std.debug.print("Starting I/O bridge for stream {}...\n", .{stream_id});
 
-    var pty_buffer: [4096]u8 = undefined;
-    var channel_buffer: [4096]u8 = undefined;
+    // Larger buffers for better throughput
+    var pty_buffer: [16384]u8 = undefined;
+    var channel_buffer: [16384]u8 = undefined;
 
     // Set PTY to non-blocking mode
     const flags = try std.posix.fcntl(pty.master_fd, std.posix.F.GETFL, 0);
     _ = try std.posix.fcntl(pty.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
 
-    // I/O loop
+    // I/O loop - optimized for low latency
     while (true) {
-        // Poll for incoming data from client
-        server_conn.transport.poll(100) catch {}; // 100ms timeout, ignore errors
+        // Poll with minimal timeout for low latency (1ms)
+        server_conn.transport.poll(1) catch {};
 
         // Read from SSH channel (client input) and write to PTY
         const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch 0;
         if (channel_len > 0) {
             const data = channel_buffer[0..channel_len];
-            std.debug.print("← Client sent {} bytes\n", .{channel_len});
 
             // Decode CHANNEL_DATA message
             if (data.len > 0 and data[0] == 94) { // SSH_MSG_CHANNEL_DATA
@@ -255,7 +308,6 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
                     break;
                 };
             } else if (data.len > 0 and data[0] == 96) { // SSH_MSG_CHANNEL_EOF
-                std.debug.print("Client sent EOF\n", .{});
                 break;
             }
         }
@@ -263,8 +315,7 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
         // Read from PTY (shell output) and send to SSH channel
         const pty_len = pty.read(&pty_buffer) catch |err| {
             if (err == error.WouldBlock) {
-                // No data available, continue
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                // No data available, continue polling
                 continue;
             }
             std.debug.print("PTY read error: {}\n", .{err});
@@ -272,7 +323,6 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
         };
 
         if (pty_len > 0) {
-            std.debug.print("→ Shell output {} bytes\n", .{pty_len});
             // Send shell output to client
             try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
         }
@@ -280,11 +330,31 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
 
     std.debug.print("Session ended for stream {}\n", .{stream_id});
 
-    // Clean up
+    // Clean up PTY session
     if (active_shells.fetchRemove(stream_id)) |entry| {
-        entry.value.deinit();
-        server_conn.allocator.destroy(entry.value);
+        var pty_session = entry.value;
+        pty_session.deinit();
     }
+}
+
+/// PTY handler - called when client requests a PTY
+fn ptyHandler(stream_id: u64, pty_info: syslink.channels.SessionServer.PtyInfo) !void {
+    std.debug.print("  → PTY requested: TERM={s}, {}x{}\n", .{ pty_info.term, pty_info.width_chars, pty_info.height_rows });
+
+    const allocator = std.heap.page_allocator;
+
+    // Store PTY request info for later use in shell handler
+    const stored_info = PtyRequestInfo{
+        .term = try allocator.dupe(u8, pty_info.term),
+        .width_chars = pty_info.width_chars,
+        .height_rows = pty_info.height_rows,
+        .width_pixels = pty_info.width_pixels,
+        .height_pixels = pty_info.height_pixels,
+        .modes = try allocator.dupe(u8, pty_info.modes),
+        .allocator = allocator,
+    };
+
+    try pty_requests.put(stream_id, stored_info);
 }
 
 /// Shell handler - called when client requests a shell
@@ -293,6 +363,9 @@ fn shellHandler(stream_id: u64) !void {
 
     const allocator = std.heap.page_allocator;
 
+    // Get PTY request info (if available)
+    const pty_info = pty_requests.get(stream_id);
+
     // Create PTY
     const pty = try allocator.create(syslink.platform.pty.Pty);
     errdefer allocator.destroy(pty);
@@ -300,15 +373,50 @@ fn shellHandler(stream_id: u64) !void {
     pty.* = try syslink.platform.pty.Pty.create(allocator);
     errdefer pty.deinit();
 
-    // Set terminal size (default 80x24)
-    try pty.setWindowSize(24, 80);
+    // Set terminal size from PTY request or default
+    var term_env: []const u8 = "xterm-256color";
+    if (pty_info) |info| {
+        try pty.setWindowSize(@intCast(info.height_rows), @intCast(info.width_chars));
+        term_env = info.term;
+    } else {
+        try pty.setWindowSize(24, 80);
+    }
 
-    // Spawn shell
-    const pid = try syslink.platform.pty.spawnShell(pty, "user");
+    // Get user info and prepare environment
+    const user_info_ptr = c.getpwnam("bresilla") orelse c.getpwnam("root");
+    if (user_info_ptr == null) {
+        return error.UserNotFound;
+    }
+    const user_info = user_info_ptr.?.*;
+
+    // Allocate null-terminated TERM string if from PTY request
+    var term_buf: [256]u8 = undefined;
+    var term_ptr: [*:0]const u8 = "xterm-256color";
+    if (pty_info) |info| {
+        if (info.term.len < term_buf.len - 1) {
+            @memcpy(term_buf[0..info.term.len], info.term);
+            term_buf[info.term.len] = 0;
+            term_ptr = @ptrCast(term_buf[0..info.term.len :0]);
+        }
+    }
+
+    const shell_env = syslink.platform.pty.ShellEnv{
+        .term = term_ptr,
+        .home = user_info.pw_dir,
+        .shell = user_info.pw_shell,
+        .user = user_info.pw_name,
+        .logname = user_info.pw_name,
+    };
+
+    // Spawn shell with environment
+    const pid = try syslink.platform.pty.spawnShell(pty, shell_env);
     std.debug.print("  ✓ Spawned shell with PID {}\n", .{pid});
 
-    // Store PTY for this session
-    try active_shells.put(stream_id, pty);
+    // Store PTY session for this stream
+    try active_shells.put(stream_id, .{
+        .pty = pty,
+        .allocator = allocator,
+    });
 
     std.debug.print("  ✓ Shell session ready on stream {}\n", .{stream_id});
 }
@@ -419,14 +527,19 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Server loop
     var client_count: usize = 0;
     while (true) {
-        client_count += 1;
-        std.debug.print("--- Client #{d} ---\n", .{client_count});
-
         var server_conn = listener.acceptConnection() catch |err| {
+            if (err == error.WouldBlock) {
+                // No connection ready, wait before trying again
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+                continue;
+            }
             std.debug.print("✗ Failed to accept connection: {}\n\n", .{err});
             continue;
         };
         defer server_conn.deinit();
+
+        client_count += 1;
+        std.debug.print("--- Client #{d} ---\n", .{client_count});
 
         std.debug.print("✓ Client connected\n", .{});
 
@@ -434,12 +547,6 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         const Validators = struct {
             fn passValidator(user: []const u8, pass: []const u8) bool {
                 // Check if user exists on system
-                const c = @cImport({
-                    @cInclude("pwd.h");
-                    @cInclude("unistd.h");
-                    @cInclude("string.h");
-                });
-
                 // Need null-terminated string for C
                 var user_buf: [256]u8 = undefined;
                 if (user.len >= user_buf.len) return false;
@@ -510,6 +617,59 @@ fn serverStatus(allocator: std.mem.Allocator) !void {
 // CLIENT COMMANDS
 // ============================================================================
 
+/// Get terminal window size
+fn getTerminalSize() !struct { rows: u32, cols: u32 } {
+    var ws: c.winsize = undefined;
+    if (c.ioctl(std.posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == -1) {
+        // Default to 80x24 if ioctl fails
+        return .{ .rows = 24, .cols = 80 };
+    }
+
+    return .{
+        .rows = if (ws.ws_row > 0) ws.ws_row else 24,
+        .cols = if (ws.ws_col > 0) ws.ws_col else 80,
+    };
+}
+
+/// Enter terminal raw mode (disables echo, line buffering, etc.)
+fn enterRawMode(original: *anyopaque) !void {
+    const orig = @as(*c.termios, @ptrCast(@alignCast(original)));
+
+    // Save current terminal settings
+    if (c.tcgetattr(std.posix.STDIN_FILENO, orig) != 0) {
+        return error.TcGetAttrFailed;
+    }
+
+    var raw: c.termios = orig.*;
+
+    // Input modes - disable break, CR->NL, parity, strip, flow control
+    raw.c_iflag &= ~@as(c_uint, c.BRKINT | c.ICRNL | c.INPCK | c.ISTRIP | c.IXON);
+
+    // Output modes - disable post processing
+    raw.c_oflag &= ~@as(c_uint, c.OPOST);
+
+    // Control modes - set 8 bit chars
+    raw.c_cflag |= @as(c_uint, c.CS8);
+
+    // Local modes - disable echo, canonical, extended input, signals
+    raw.c_lflag &= ~@as(c_uint, c.ECHO | c.ICANON | c.IEXTEN | c.ISIG);
+
+    // Set read to return immediately
+    raw.c_cc[c.VMIN] = 0;
+    raw.c_cc[c.VTIME] = 0;
+
+    // Apply immediately
+    if (c.tcsetattr(std.posix.STDIN_FILENO, c.TCSAFLUSH, &raw) != 0) {
+        return error.TcSetAttrFailed;
+    }
+}
+
+/// Restore terminal to original mode
+fn restoreTerminalMode(original: *const anyopaque) void {
+    const orig = @as(*const c.termios, @ptrCast(@alignCast(original)));
+    _ = c.tcsetattr(std.posix.STDIN_FILENO, c.TCSAFLUSH, orig);
+}
+
 fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -517,11 +677,6 @@ fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
     try stdout.writeAll(prompt);
 
     // Disable echo using termios
-    const c = @cImport({
-        @cInclude("termios.h");
-        @cInclude("unistd.h");
-    });
-
     var old_termios: c.termios = undefined;
     var new_termios: c.termios = undefined;
 
@@ -648,7 +803,10 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     std.debug.print("✓ Authenticated\n\n", .{});
 
-    var session = conn.requestShell() catch |err| {
+    // Get terminal size
+    const term_size = try getTerminalSize();
+
+    var session = conn.requestShell(term_size.cols, term_size.rows) catch |err| {
         std.debug.print("✗ Failed to start shell: {}\n", .{err});
         std.process.exit(1);
     };
@@ -656,99 +814,62 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     std.debug.print("Shell session active. Type commands or 'exit' to quit.\n\n", .{});
 
+    // Enter raw mode for proper terminal handling
+    var original_termios: c.termios = undefined;
+    enterRawMode(&original_termios) catch {
+        std.debug.print("Warning: Could not enter raw mode\n", .{});
+    };
+    defer restoreTerminalMode(&original_termios);
+
     try runShellInteractive(allocator, &session);
 }
 
 fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
+    _ = allocator;
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    // Make stdin non-blocking
-    const stdin_flags = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.GETFL, 0) catch 0;
-    _ = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.SETFL, stdin_flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true }))) catch {};
-
-    var input_buffer: [4096]u8 = undefined;
-    var input_len: usize = 0;
     var running = true;
+    var stdin_buffer: [16384]u8 = undefined;
 
-    // Main I/O loop - poll both directions
+    // Optimized I/O loop for low latency
     while (running) {
-        // Poll for server data
-        session.manager.transport.poll(50) catch {}; // 50ms timeout
+        // Poll with minimal timeout (1ms)
+        session.manager.transport.poll(1) catch {};
 
-        // Check for server output
-        if (session.receiveData()) |data| {
-            defer allocator.free(data);
-            stdout.writeAll(data) catch {};
-        } else |err| {
-            // Ignore NoData/EndOfBuffer errors (normal when no data available)
-            if (err != error.EndOfBuffer and err != error.NoData) {
-                std.debug.print("\nError receiving data: {}\n", .{err});
-            }
-        }
-
-        // Check for user input (non-blocking)
-        var byte: [1]u8 = undefined;
-        const n: usize = stdin.read(&byte) catch |err| blk: {
+        // Check for stdin input (non-blocking)
+        const stdin_len: usize = stdin.read(&stdin_buffer) catch |err| blk: {
             if (err == error.WouldBlock) break :blk 0;
             if (err == error.EOF or err == error.EndOfStream) {
                 running = false;
                 break :blk 0;
             }
-            return err;
+            break :blk 0;
         };
 
-        if (n > 0) {
-            const ch = byte[0];
-
-            // Handle backspace
-            if (ch == 127 or ch == 8) {
-                if (input_len > 0) {
-                    input_len -= 1;
-                    stdout.writeAll("\x08 \x08") catch {};
-                }
+        // Forward stdin to server
+        if (stdin_len > 0) {
+            session.sendData(stdin_buffer[0..stdin_len]) catch |err| {
+                std.debug.print("\nError sending data: {}\n", .{err});
+                running = false;
                 continue;
-            }
-
-            // Echo character
-            stdout.writeAll(&byte) catch {};
-
-            // Add to buffer
-            if (input_len < input_buffer.len) {
-                input_buffer[input_len] = ch;
-                input_len += 1;
-            }
-
-            // Send on newline
-            if (ch == '\n') {
-                const line = input_buffer[0..input_len];
-
-                // Check for exit
-                if (input_len > 1) {
-                    const trimmed = std.mem.trim(u8, line[0 .. input_len - 1], &std.ascii.whitespace);
-                    if (std.mem.eql(u8, trimmed, "exit")) {
-                        running = false;
-                        input_len = 0;
-                        continue;
-                    }
-                }
-
-                // Send to server
-                session.sendData(line) catch |err| {
-                    std.debug.print("\nError sending data: {}\n", .{err});
-                };
-                input_len = 0;
-            }
+            };
         }
 
-        // Small delay to avoid busy-waiting
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        // Check for server output (non-blocking)
+        if (session.receiveData()) |data| {
+            defer session.manager.allocator.free(data);
+            stdout.writeAll(data) catch {};
+        } else |err| {
+            // Ignore NoData/EndOfBuffer errors (normal when no data available)
+            if (err != error.EndOfBuffer and err != error.NoData) {
+                // Connection closed or error
+                running = false;
+            }
+        }
     }
 
-    // Restore stdin to blocking mode
-    _ = std.posix.fcntl(std.posix.STDIN_FILENO, std.posix.F.SETFL, stdin_flags) catch {};
-
-    stdout.writeAll("\nClosing shell...\n") catch {};
+    stdout.writeAll("\r\nConnection closed\r\n") catch {};
 }
 
 fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ChannelManager = @import("manager.zig").ChannelManager;
 const channel_protocol = @import("../protocol/channel.zig");
 const wire = @import("../protocol/wire.zig");
+const ttymodes = @import("../protocol/ttymodes.zig");
 
 /// Session Channel
 ///
@@ -76,10 +77,9 @@ pub const SessionChannel = struct {
         width_pixels: u32,
         height_pixels: u32,
     ) !void {
-        // Encode terminal modes (empty for now)
-        const modes = try self.allocator.alloc(u8, 1);
+        // Encode current terminal modes per RFC 4254 Section 8
+        const modes = try ttymodes.encodeTerminalModes(self.allocator);
         defer self.allocator.free(modes);
-        modes[0] = 0; // TTY_OP_END
 
         // Build type-specific data for pty-req
         const pty_data = try encodePtyRequest(
@@ -273,6 +273,19 @@ pub const SessionServer = struct {
 
     const Self = @This();
 
+    /// PTY request information
+    pub const PtyInfo = struct {
+        term: []const u8,
+        width_chars: u32,
+        height_rows: u32,
+        width_pixels: u32,
+        height_pixels: u32,
+        modes: []const u8,
+    };
+
+    /// Callback for handling PTY requests
+    pub const PtyHandler = *const fn (stream_id: u64, pty_info: PtyInfo) anyerror!void;
+
     /// Callback for handling shell requests
     pub const ShellHandler = *const fn (stream_id: u64) anyerror!void;
 
@@ -301,6 +314,7 @@ pub const SessionServer = struct {
         self: *Self,
         stream_id: u64,
         data: []const u8,
+        pty_handler: ?PtyHandler,
         shell_handler: ?ShellHandler,
         exec_handler: ?ExecHandler,
         subsystem_handler: ?SubsystemHandler,
@@ -342,8 +356,33 @@ pub const SessionServer = struct {
                 try self.manager.sendFailure(stream_id);
             }
         } else if (std.mem.eql(u8, request_info.request.request_type, "pty-req")) {
-            // PTY requests are typically accepted automatically
-            try self.manager.sendSuccess(stream_id);
+            if (pty_handler) |handler| {
+                // Decode PTY request data
+                var reader = wire.Reader{ .buffer = request_info.request.type_specific_data };
+                const term = try reader.readString(self.allocator);
+                errdefer self.allocator.free(term);
+                const width_chars = try reader.readUint32();
+                const height_rows = try reader.readUint32();
+                const width_pixels = try reader.readUint32();
+                const height_pixels = try reader.readUint32();
+                const modes = try reader.readString(self.allocator);
+                errdefer self.allocator.free(modes);
+
+                const pty_info = PtyInfo{
+                    .term = term,
+                    .width_chars = width_chars,
+                    .height_rows = height_rows,
+                    .width_pixels = width_pixels,
+                    .height_pixels = height_pixels,
+                    .modes = modes,
+                };
+
+                try handler(stream_id, pty_info);
+                try self.manager.sendSuccess(stream_id);
+            } else {
+                // No handler, just accept
+                try self.manager.sendSuccess(stream_id);
+            }
         } else {
             // Unknown request type
             std.log.warn("Unknown channel request type: {s}", .{request_info.request.request_type});

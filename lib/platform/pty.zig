@@ -6,6 +6,7 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) [*:0]const u8;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" var environ: [*:null]?[*:0]u8;
 
 /// PTY (Pseudo-Terminal) for shell sessions
 ///
@@ -82,15 +83,21 @@ pub const Pty = struct {
     }
 };
 
-/// Spawn a shell in a PTY
-pub fn spawnShell(pty: *Pty, username: []const u8) !posix.pid_t {
-    _ = username; // TODO: Look up user's shell from /etc/passwd
+pub const ShellEnv = struct {
+    term: [*:0]const u8 = "xterm-256color",
+    home: [*:0]const u8,
+    shell: [*:0]const u8,
+    user: [*:0]const u8,
+    logname: [*:0]const u8,
+};
 
+/// Spawn a shell in a PTY
+pub fn spawnShell(pty: *Pty, env: ShellEnv) !posix.pid_t {
     const pid = try posix.fork();
 
     if (pid == 0) {
         // Child process
-        childSetup(pty) catch |err| {
+        childSetup(pty, env) catch |err| {
             std.debug.print("Child setup failed: {}\n", .{err});
             std.process.exit(1);
         };
@@ -103,7 +110,7 @@ pub fn spawnShell(pty: *Pty, username: []const u8) !posix.pid_t {
 }
 
 /// Child process setup (runs in forked child)
-fn childSetup(pty: *Pty) !void {
+fn childSetup(pty: *Pty, env: ShellEnv) !void {
     // Create new session
     if (std.c.setsid() < 0) {
         return error.SetsidFailed;
@@ -136,24 +143,22 @@ fn childSetup(pty: *Pty) !void {
     // Close master fd (child doesn't need it)
     posix.close(pty.master_fd);
 
-    // Set environment
-    _ = setenv("TERM", "xterm-256color", 1);
+    // Set environment variables before exec
+    _ = setenv("TERM", env.term, 1);
+    _ = setenv("HOME", env.home, 1);
+    _ = setenv("SHELL", env.shell, 1);
+    _ = setenv("USER", env.user, 1);
+    _ = setenv("LOGNAME", env.logname, 1);
+    _ = setenv("PATH", "/usr/local/bin:/usr/bin:/bin", 1);
 
     // Execute shell
-    const shell = "/bin/bash";
     const argv = [_:null]?[*:0]const u8{
-        shell,
+        env.shell,
         "-i", // Interactive
         null,
     };
 
-    const envp = [_:null]?[*:0]const u8{
-        "TERM=xterm-256color",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
-        null,
-    };
-
-    // exec never returns on success
-    const err = posix.execveZ(shell, &argv, &envp);
+    // exec never returns on success (environ is already set by setenv calls above)
+    const err = posix.execveZ(env.shell, &argv, @ptrCast(environ));
     return err;
 }
