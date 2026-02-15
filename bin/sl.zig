@@ -9,6 +9,9 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
     @cInclude("termios.h");
     @cInclude("poll.h");
+    @cInclude("security/pam_appl.h");
+    @cInclude("shadow.h");
+    @cInclude("crypt.h");
 });
 
 const VERSION = "0.1.0";
@@ -625,30 +628,26 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // Handle authentication - validate against system users
         const Validators = struct {
             fn passValidator(user: []const u8, pass: []const u8) bool {
-                // Check if user exists on system
-                // Need null-terminated string for C
-                var user_buf: [256]u8 = undefined;
-                if (user.len >= user_buf.len) return false;
-                @memcpy(user_buf[0..user.len], user);
-                user_buf[user.len] = 0;
+                std.debug.print("  → Validating password for user '{s}'\n", .{user});
 
-                const pwd = c.getpwnam(@ptrCast(&user_buf));
-                if (pwd == null) {
-                    std.debug.print("  ✗ User '{s}' not found on system\n", .{user});
-                    return false;
+                if (syslink.auth.system.validatePassword(user, pass)) {
+                    std.debug.print("  ✓ Password authenticated\n", .{});
+                    return true;
                 }
 
-                // TODO: Real password validation via PAM
-                // For now: accept any password if user exists (INSECURE - for demo only)
-                _ = pass;
-                std.debug.print("  ✓ User '{s}' exists (accepting any password for demo)\n", .{user});
-                std.debug.print("  ⚠️  WARNING: Password validation not implemented - this is INSECURE!\n", .{});
-                return true;
+                std.debug.print("  ✗ Password authentication failed\n", .{});
+                return false;
             }
 
-            fn keyValidator(user: []const u8, _: []const u8, _: []const u8) bool {
-                // TODO: Check ~/.ssh/authorized_keys for the user
-                std.debug.print("  ✗ Public key auth not implemented yet for user '{s}'\n", .{user});
+            fn keyValidator(user: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
+                std.debug.print("  → Checking public key for user '{s}' (algorithm: {s})\n", .{ user, algorithm });
+
+                if (syslink.auth.system.validatePublicKey(user, algorithm, public_key_blob)) {
+                    std.debug.print("  ✓ Public key authenticated\n", .{});
+                    return true;
+                }
+
+                std.debug.print("  ✗ Public key not found in authorized_keys\n", .{});
                 return false;
             }
         };

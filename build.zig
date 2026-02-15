@@ -40,6 +40,10 @@ pub fn build(b: *std.Build) !void {
         .root_module = syslink_module,
         .linkage = .static,
     });
+    // TODO: Uncomment when PAM development libraries are installed
+    // lib.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+    // lib.linkSystemLibrary("pam");
+    // lib.linkSystemLibrary("crypt");
 
     b.installArtifact(lib);
 
@@ -99,6 +103,10 @@ pub fn build(b: *std.Build) !void {
         .name = "sl",
         .root_module = sl_module,
     });
+    // TODO: Uncomment when PAM development libraries are installed
+    // sl.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+    // sl.linkSystemLibrary("pam");
+    // sl.linkSystemLibrary("crypt");
     b.installArtifact(sl);
 
     const sl_step = b.step("sl", "Compile sl CLI binary");
