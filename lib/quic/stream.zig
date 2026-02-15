@@ -81,10 +81,15 @@ pub const Stream = struct {
     /// Read available data from receive buffer
     ///
     /// Returns number of bytes read (may be less than buffer.len)
+    /// Returns error.StreamClosed if stream is closed and no data available
     pub fn read(self: *Self, buffer: []u8) !usize {
         const available = self.recv_buffer.items.len;
         if (available == 0) {
-            return 0; // No data available
+            // If stream is closed/half-closed from remote and no data, signal EOF
+            if (self.state == .closed or self.state == .half_closed_remote) {
+                return error.StreamClosed;
+            }
+            return 0; // No data available yet, but stream still open
         }
 
         const to_read = @min(buffer.len, available);
@@ -188,6 +193,12 @@ pub const Stream = struct {
     /// Check if stream has data to send
     pub fn hasDataToSend(self: *const Self) bool {
         return self.send_buffer.items.len > 0;
+    }
+
+    /// Check if we should send FIN (stream is closing and all data sent)
+    pub fn shouldSendFin(self: *const Self) bool {
+        return (self.state == .half_closed_local or self.state == .closed) and
+               self.send_buffer.items.len == 0;
     }
 
     /// Check if stream has data available to read

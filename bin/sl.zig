@@ -333,8 +333,15 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
             }
             // PTY error (e.g., shell exited) - send EOF and close channel
             std.debug.print("PTY read error (shell likely exited): {}\n", .{err});
-            server_conn.channel_manager.sendEof(stream_id) catch {};
-            server_conn.channel_manager.closeChannel(stream_id) catch {};
+            std.debug.print("Sending EOF to client...\n", .{});
+            server_conn.channel_manager.sendEof(stream_id) catch |eof_err| {
+                std.debug.print("ERROR: Failed to send EOF: {}\n", .{eof_err});
+            };
+            std.debug.print("Closing channel...\n", .{});
+            server_conn.channel_manager.closeChannel(stream_id) catch |close_err| {
+                std.debug.print("ERROR: Failed to close channel: {}\n", .{close_err});
+            };
+            std.debug.print("Done - EOF sent and channel closed\n", .{});
             break;
         };
 
@@ -836,16 +843,26 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.debug.print("✗ Failed to start shell: {}\n", .{err});
         std.process.exit(1);
     };
-    defer session.close() catch {};
+    defer {
+        session.close() catch {};
+    }
 
     std.debug.print("Shell session active. Type commands or 'exit' to quit.\n\n", .{});
 
     // Enter raw mode for proper terminal handling
     var original_termios: c.termios = undefined;
-    enterRawMode(&original_termios) catch {
-        std.debug.print("Warning: Could not enter raw mode\n", .{});
+    const entered_raw_mode = blk: {
+        enterRawMode(&original_termios) catch {
+            std.debug.print("Warning: Could not enter raw mode\n", .{});
+            break :blk false;
+        };
+        break :blk true;
     };
-    defer restoreTerminalMode(&original_termios);
+    defer {
+        if (entered_raw_mode) {
+            restoreTerminalMode(&original_termios);
+        }
+    }
 
     // Set up signal handler for clean exit on Ctrl+C
     var act = std.posix.Sigaction{
@@ -855,7 +872,17 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
-    try runShellInteractive(allocator, &session);
+    runShellInteractive(allocator, &session) catch |err| {
+        std.debug.print("\r\nSession error: {}\r\n", .{err});
+    };
+
+    // Reset exit flag for future connections
+    should_exit.store(false, .release);
+
+    // Force terminal restore before any cleanup
+    if (entered_raw_mode) {
+        restoreTerminalMode(&original_termios);
+    }
 }
 
 fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
@@ -870,7 +897,6 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
     while (running) {
         // Check if user pressed Ctrl+C
         if (should_exit.load(.acquire)) {
-            std.debug.print("\r\n[Interrupted by user]\r\n", .{});
             break;
         }
 
@@ -901,12 +927,17 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
             defer session.manager.allocator.free(data);
             stdout.writeAll(data) catch {};
         } else |err| {
-            // EOF or connection closed
-            if (err == error.InvalidMessageType) {
-                // Might be EOF message - check and exit gracefully
+            // Handle errors
+            if (err == error.StreamClosed) {
+                // Stream closed by server - clean exit
+                running = false;
+            } else if (err == error.InvalidMessageType) {
+                // Got EOF or other non-data message
+                std.debug.print("\r\n[CLIENT] Received EOF from server, exiting\r\n", .{});
                 running = false;
             } else if (err != error.NoData and err != error.EndOfBuffer) {
                 // Real error - exit
+                std.debug.print("\r\n[CLIENT] Connection error: {}, exiting\r\n", .{err});
                 running = false;
             }
         }

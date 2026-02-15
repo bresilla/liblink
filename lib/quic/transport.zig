@@ -275,12 +275,19 @@ pub const QuicTransport = struct {
                 // Get data to send (up to 1200 bytes to fit in UDP packet)
                 const to_send = stream.dataToSend(1200) orelse break;
 
+                // Check if we should send FIN with this frame:
+                // - Stream is closing (half_closed_local or closed)
+                // - This is the last data in send buffer
+                const is_last_data = to_send.data.len == stream.send_buffer.items.len;
+                const is_closing = (stream.state == .half_closed_local or stream.state == .closed);
+                const fin = is_closing and is_last_data;
+
                 // Create STREAM frame
                 const stream_frame = frame.StreamFrame{
                     .stream_id = stream_id,
                     .offset = to_send.offset,
                     .data = to_send.data,
-                    .fin = false,
+                    .fin = fin,
                 };
 
                 // Encode frame
@@ -292,6 +299,21 @@ pub const QuicTransport = struct {
 
                 // Mark data as sent
                 try stream.markSent(to_send.data.len);
+            }
+
+            // If stream should send FIN but has no data left, send FIN-only frame
+            if (stream.shouldSendFin()) {
+                const stream_frame = frame.StreamFrame{
+                    .stream_id = stream_id,
+                    .offset = stream.send_offset,
+                    .data = &[_]u8{}, // Empty data
+                    .fin = true,
+                };
+
+                const frame_data = try stream_frame.encode(self.allocator);
+                defer self.allocator.free(frame_data);
+
+                try self.sendPacket(frame_data);
             }
         }
 

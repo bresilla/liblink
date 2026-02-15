@@ -160,7 +160,7 @@ pub const Connection = struct {
         }
     }
 
-    /// Get all streams that have data to send
+    /// Get all streams that have data to send or need to send FIN
     pub fn streamsWithDataToSend(self: *Self) ![]u64 {
         var stream_ids = std.ArrayList(u64){};
         errdefer stream_ids.deinit(self.allocator);
@@ -168,7 +168,8 @@ pub const Connection = struct {
         var it = self.streams.iterator();
         while (it.next()) |entry| {
             const stream = entry.value_ptr.*;
-            if (stream.hasDataToSend()) {
+            // Include streams with data OR streams that need to send FIN
+            if (stream.hasDataToSend() or stream.shouldSendFin()) {
                 try stream_ids.append(self.allocator, stream.stream_id);
             }
         }
