@@ -7,7 +7,6 @@ const constants = @import("../common/constants.zig");
 ///
 /// Handles authentication after key exchange is complete.
 /// Supports password and public key authentication methods.
-
 /// SSH_MSG_USERAUTH_REQUEST - Client authentication request
 pub const UserauthRequest = struct {
     username: []const u8,
@@ -337,7 +336,12 @@ test "UserauthFailure - encode/decode" {
 
     const methods = [_][]const u8{ "password", "publickey" };
     var methods_owned = try allocator.alloc([]const u8, methods.len);
-    defer allocator.free(methods_owned);
+    defer {
+        for (methods_owned) |method| {
+            allocator.free(method);
+        }
+        allocator.free(methods_owned);
+    }
 
     for (methods, 0..) |method, i| {
         methods_owned[i] = try allocator.dupe(u8, method);

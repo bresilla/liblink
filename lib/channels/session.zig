@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const ChannelManager = @import("manager.zig").ChannelManager;
 const channel_protocol = @import("../protocol/channel.zig");
@@ -11,7 +12,6 @@ const ttymodes = @import("../protocol/ttymodes.zig");
 /// command execution, and subsystems (like SFTP).
 ///
 /// Per RFC 4254 Section 6.
-
 pub const SessionChannel = struct {
     manager: *ChannelManager,
     stream_id: u64,
@@ -420,7 +420,9 @@ pub const SessionServer = struct {
 /// This is a basic implementation that spawns /bin/sh with a PTY.
 /// Production servers should customize this based on user preferences.
 pub fn defaultShellHandler(stream_id: u64) !void {
-    std.log.info("Spawning shell for stream {}", .{stream_id});
+    if (!builtin.is_test) {
+        std.log.info("Spawning shell for stream {}", .{stream_id});
+    }
 
     // In a real implementation, this would:
     // 1. Fork a new process
@@ -430,14 +432,18 @@ pub fn defaultShellHandler(stream_id: u64) !void {
     // 5. Bridge PTY master <-> SSH channel data
     //
     // For now, this is a stub that logs the action
-    std.log.warn("Shell spawning not yet implemented - PTY support requires platform-specific code", .{});
+    if (!builtin.is_test) {
+        std.log.warn("Shell spawning not yet implemented - PTY support requires platform-specific code", .{});
+    }
 }
 
 /// Reference exec handler - executes a command
 ///
 /// Runs a single command and returns output on the channel.
 pub fn defaultExecHandler(stream_id: u64, command: []const u8) !void {
-    std.log.info("Executing command on stream {}: {s}", .{ stream_id, command });
+    if (!builtin.is_test) {
+        std.log.info("Executing command on stream {}: {s}", .{ stream_id, command });
+    }
 
     // In a real implementation, this would:
     // 1. Fork a new process
@@ -447,14 +453,18 @@ pub fn defaultExecHandler(stream_id: u64, command: []const u8) !void {
     // 5. Send exit status when command completes
     //
     // For now, this is a stub that logs the action
-    std.log.warn("Command execution not yet implemented - requires process spawning", .{});
+    if (!builtin.is_test) {
+        std.log.warn("Command execution not yet implemented - requires process spawning", .{});
+    }
 }
 
 /// Reference subsystem handler - dispatches to subsystem implementations
 ///
 /// Routes subsystem requests to appropriate handlers (e.g., SFTP).
 pub fn defaultSubsystemHandler(stream_id: u64, subsystem_name: []const u8) !void {
-    std.log.info("Starting subsystem '{s}' on stream {}", .{ subsystem_name, stream_id });
+    if (!builtin.is_test) {
+        std.log.info("Starting subsystem '{s}' on stream {}", .{ subsystem_name, stream_id });
+    }
 
     if (std.mem.eql(u8, subsystem_name, "sftp")) {
         // In a real implementation, this would:
@@ -463,9 +473,13 @@ pub fn defaultSubsystemHandler(stream_id: u64, subsystem_name: []const u8) !void
         // 3. Process file operations (open, read, write, etc.)
         //
         // For now, log that SFTP would be started
-        std.log.info("SFTP subsystem would be started here", .{});
+        if (!builtin.is_test) {
+            std.log.info("SFTP subsystem would be started here", .{});
+        }
     } else {
-        std.log.err("Unknown subsystem: {s}", .{subsystem_name});
+        if (!builtin.is_test) {
+            std.log.warn("Unknown subsystem: {s}", .{subsystem_name});
+        }
         return error.UnknownSubsystem;
     }
 }

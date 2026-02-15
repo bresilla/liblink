@@ -17,10 +17,18 @@ A complete implementation of the SSH/QUIC protocol in Zig, providing secure remo
 - ✅ **Session Channels** - Shell, command execution, and subsystems
 
 ### File Transfer
-- ✅ **SFTP Client** - Complete SFTP v3 implementation
-- ✅ **SFTP Server** - Handle file operations (read, write, list, mkdir, remove)
-- ✅ **SSHFS** - Mount remote filesystems via FUSE
+- ✅ **SFTP Client** - SFTP v3 operations including stat/setstat and symlink support
+- ✅ **SFTP Server** - Subsystem wiring, path jail (`remote_root`), and core file operations
 - ✅ **Directory Caching** - TTL-based caching for performance
+
+## Capability Matrix
+
+| Capability | Status | Notes |
+|---|---|---|
+| SFTP subsystem in `sl server` | ✅ Implemented | Session subsystem dispatch runs `SftpServer.run()` |
+| SFTP setstat/lstat/readlink/symlink | ✅ Implemented | Includes status mapping and symlink-aware stat behavior |
+| SFTP path security (`remote_root`) | ✅ Implemented | Traversal guarded and root-scoped resolution |
+| SFTP integration harness | ✅ Implemented | In-process client/server E2E coverage |
 
 ### Tools & Utilities
 - ✅ **CLI Tool** - Command-line interface for SSH/SFTP operations
@@ -70,11 +78,6 @@ ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
 
 # Start server
 ./zig-out/bin/server_demo
-```
-
-**Mount remote filesystem with SSHFS:**
-```bash
-./zig-out/bin/sshfs user@host:/remote/path /local/mountpoint
 ```
 
 ## Library Usage
@@ -222,49 +225,6 @@ fn validatePublicKey(username: []const u8, algo: []const u8, key: []const u8) bo
 }
 ```
 
-### SSHFS Filesystem Mounting
-
-```zig
-const syslink = @import("syslink");
-
-pub fn main() !void {
-    // ... allocator setup ...
-
-    // Connect to SSH server
-    var conn = try syslink.connection.connectClient(
-        allocator,
-        "server.example.com",
-        2222,
-        random,
-    );
-    defer conn.deinit();
-
-    // Authenticate with public key
-    const authed = try syslink.sshfs.filesystem.connectWithPublicKey(
-        &conn,
-        "username",
-        "/home/user/.ssh/id_ed25519",
-    );
-    if (!authed) return error.AuthenticationFailed;
-
-    // Create and mount filesystem
-    var fs = try syslink.sshfs.filesystem.SshfsFilesystem.init(
-        allocator,
-        &conn,
-        "/local/mountpoint",
-        .{
-            .remote_root = "/remote/path",
-            .cache_ttl = 5, // 5 second cache
-            .allow_other = false,
-        },
-    );
-    defer fs.deinit();
-
-    // Mount (blocking call)
-    try fs.mount(.{});
-}
-```
-
 ## Architecture
 
 ```
@@ -391,6 +351,7 @@ zig build test
 zig build
 ./zig-out/bin/client_demo
 ./zig-out/bin/server_demo
+
 ```
 
 ### Contributing
@@ -493,7 +454,6 @@ See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for detailed status.
 - ✅ Connection ID generation
 - ✅ Server signature verification
 - ✅ Channel open message handling
-- ✅ SSHFS public key authentication
 - ✅ Directory caching
 - ✅ Ed25519 signature implementation
 

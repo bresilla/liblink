@@ -8,6 +8,7 @@ const std = @import("std");
 // Import all integration test modules
 pub const connection = @import("connection_test.zig");
 pub const sftp = @import("sftp_test.zig");
+pub const sftp_e2e = @import("sftp_e2e_test.zig");
 pub const server_lifecycle = @import("server_lifecycle_test.zig");
 pub const demo_validation = @import("demo_validation_test.zig");
 

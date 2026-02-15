@@ -10,10 +10,54 @@ const attributes = @import("attributes.zig");
 /// - Request ID generation and tracking
 /// - File and directory handle management
 /// - Synchronous file operations
-
 pub const SftpClient = struct {
+    pub const SendFn = *const fn (ctx: *anyopaque, data: []const u8) anyerror!void;
+    pub const ReceiveFn = *const fn (ctx: *anyopaque, allocator: Allocator) anyerror![]u8;
+    pub const DeinitFn = *const fn (ctx: *anyopaque) void;
+
+    const ChannelRef = struct {
+        channel: ?Channel = null,
+        ctx: ?*anyopaque = null,
+        send_fn: ?SendFn = null,
+        receive_fn: ?ReceiveFn = null,
+        deinit_fn: ?DeinitFn = null,
+
+        fn fromChannel(channel: Channel) ChannelRef {
+            return .{ .channel = channel };
+        }
+
+        fn fromHooks(ctx: *anyopaque, send_fn: SendFn, receive_fn: ReceiveFn, deinit_fn: ?DeinitFn) ChannelRef {
+            return .{
+                .ctx = ctx,
+                .send_fn = send_fn,
+                .receive_fn = receive_fn,
+                .deinit_fn = deinit_fn,
+            };
+        }
+
+        fn send(self: *ChannelRef, data: []const u8) !void {
+            if (self.send_fn) |f| return f(self.ctx.?, data);
+            return self.channel.?.send(data);
+        }
+
+        fn receive(self: *ChannelRef, allocator: Allocator) ![]u8 {
+            if (self.receive_fn) |f| return f(self.ctx.?, allocator);
+            return self.channel.?.receive(allocator);
+        }
+
+        fn deinit(self: *ChannelRef) void {
+            if (self.deinit_fn) |f| {
+                f(self.ctx.?);
+                return;
+            }
+            if (self.channel) |*channel| {
+                channel.deinit();
+            }
+        }
+    };
+
     allocator: Allocator,
-    channel: Channel,
+    channel: ChannelRef,
     version: u32,
     next_request_id: u32,
 
@@ -24,7 +68,7 @@ pub const SftpClient = struct {
     pub fn init(allocator: Allocator, channel: Channel) !SftpClient {
         var client = SftpClient{
             .allocator = allocator,
-            .channel = channel,
+            .channel = ChannelRef.fromChannel(channel),
             .version = 0,
             .next_request_id = 1,
         };
@@ -42,6 +86,35 @@ pub const SftpClient = struct {
         var version = try protocol.Version.decode(allocator, version_data);
         defer version.deinit(allocator);
 
+        client.version = version.version;
+
+        return client;
+    }
+
+    pub fn initWithHooks(
+        allocator: Allocator,
+        ctx: *anyopaque,
+        send_fn: SendFn,
+        receive_fn: ReceiveFn,
+        deinit_fn: ?DeinitFn,
+    ) !SftpClient {
+        var client = SftpClient{
+            .allocator = allocator,
+            .channel = ChannelRef.fromHooks(ctx, send_fn, receive_fn, deinit_fn),
+            .version = 0,
+            .next_request_id = 1,
+        };
+
+        const init_msg = protocol.Init{ .version = protocol.SFTP_VERSION };
+        const init_packet = try init_msg.encode(allocator);
+        defer allocator.free(init_packet);
+        try client.channel.send(init_packet);
+
+        const version_data = try client.channel.receive(allocator);
+        defer allocator.free(version_data);
+
+        var version = try protocol.Version.decode(allocator, version_data);
+        defer version.deinit(allocator);
         client.version = version.version;
 
         return client;
@@ -822,6 +895,91 @@ pub const SftpClient = struct {
         return error.InvalidResponse;
     }
 
+    /// Read symbolic link target
+    pub fn readlink(self: *SftpClient, path: []const u8) ![]u8 {
+        const request_id = self.getNextRequestId();
+
+        const packet_size = 4 + 1 + 4 + 4 + path.len;
+        const packet = try self.allocator.alloc(u8, packet_size);
+        defer self.allocator.free(packet);
+
+        var offset: usize = 0;
+        std.mem.writeInt(u32, packet[offset..][0..4], @intCast(packet_size - 4), .big);
+        offset += 4;
+        packet[offset] = @intFromEnum(protocol.PacketType.SSH_FXP_READLINK);
+        offset += 1;
+        std.mem.writeInt(u32, packet[offset..][0..4], request_id, .big);
+        offset += 4;
+        std.mem.writeInt(u32, packet[offset..][0..4], @intCast(path.len), .big);
+        offset += 4;
+        @memcpy(packet[offset..][0..path.len], path);
+
+        try self.channel.send(packet);
+
+        const response = try self.channel.receive(self.allocator);
+        defer self.allocator.free(response);
+
+        if (response.len < 5) return error.InvalidResponse;
+        const response_type = response[4];
+
+        if (response_type == @intFromEnum(protocol.PacketType.SSH_FXP_NAME)) {
+            const entries = try self.decodeNamePacket(response);
+            defer {
+                for (entries) |*entry| {
+                    entry.deinit(self.allocator);
+                }
+                self.allocator.free(entries);
+            }
+
+            if (entries.len == 0) return error.InvalidResponse;
+            return try self.allocator.dupe(u8, entries[0].filename);
+        }
+        if (response_type == @intFromEnum(protocol.PacketType.SSH_FXP_STATUS)) {
+            var status = try protocol.Status.decode(self.allocator, response);
+            defer status.deinit(self.allocator);
+            return errorFromStatus(status.status_code);
+        }
+
+        return error.InvalidResponse;
+    }
+
+    /// Create symbolic link
+    pub fn symlink(self: *SftpClient, linkpath: []const u8, targetpath: []const u8) !void {
+        const request_id = self.getNextRequestId();
+
+        const packet_size = 4 + 1 + 4 + 4 + linkpath.len + 4 + targetpath.len;
+        const packet = try self.allocator.alloc(u8, packet_size);
+        defer self.allocator.free(packet);
+
+        var offset: usize = 0;
+        std.mem.writeInt(u32, packet[offset..][0..4], @intCast(packet_size - 4), .big);
+        offset += 4;
+        packet[offset] = @intFromEnum(protocol.PacketType.SSH_FXP_SYMLINK);
+        offset += 1;
+        std.mem.writeInt(u32, packet[offset..][0..4], request_id, .big);
+        offset += 4;
+
+        std.mem.writeInt(u32, packet[offset..][0..4], @intCast(linkpath.len), .big);
+        offset += 4;
+        @memcpy(packet[offset..][0..linkpath.len], linkpath);
+        offset += linkpath.len;
+
+        std.mem.writeInt(u32, packet[offset..][0..4], @intCast(targetpath.len), .big);
+        offset += 4;
+        @memcpy(packet[offset..][0..targetpath.len], targetpath);
+
+        try self.channel.send(packet);
+
+        const response = try self.channel.receive(self.allocator);
+        defer self.allocator.free(response);
+
+        var status = try protocol.Status.decode(self.allocator, response);
+        defer status.deinit(self.allocator);
+        if (status.status_code != .SSH_FX_OK) {
+            return errorFromStatus(status.status_code);
+        }
+    }
+
     // =========================================================================
     // Internal helpers
     // =========================================================================
@@ -993,7 +1151,7 @@ test "SftpClient - request ID generation" {
     // Test request ID generation without requiring a channel
     var client = SftpClient{
         .allocator = testing.allocator,
-        .channel = undefined, // Not used in this test
+        .channel = .{}, // Not used in this test
         .version = 3,
         .next_request_id = 1,
     };

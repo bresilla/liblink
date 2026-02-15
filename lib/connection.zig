@@ -134,7 +134,6 @@ pub const ClientConnection = struct {
         );
         errdefer transport.deinit();
 
-
         std.log.info("SSH/QUIC connection established", .{});
 
         // Initialize channel manager with pointer to heap-allocated transport
@@ -332,10 +331,10 @@ pub const ClientConnection = struct {
         // Request PTY before shell for proper terminal support
         try session.requestPty(
             "xterm-256color", // TERM environment variable
-            term_cols,  // width in characters (from client terminal)
-            term_rows,  // height in rows (from client terminal)
-            0,   // width in pixels (0 = not specified)
-            0,   // height in pixels (0 = not specified)
+            term_cols, // width in characters (from client terminal)
+            term_rows, // height in rows (from client terminal)
+            0, // width in pixels (0 = not specified)
+            0, // height in pixels (0 = not specified)
         );
 
         try session.requestShell();
@@ -670,7 +669,6 @@ pub const ConnectionListener = struct {
         );
         errdefer transport.deinit();
 
-
         // Allocate and track the connection
         const conn = try self.allocator.create(ServerConnection);
         errdefer self.allocator.destroy(conn);
@@ -768,12 +766,8 @@ test "ServerConnection - accept with init data" {
         .random = random,
     };
 
-    var server_conn = try ServerConnection.accept(allocator, config, init_data);
-    defer server_conn.deinit();
-
-    // Verify transport is in SSH mode
-    try testing.expect(server_conn.transport.isSshMode());
-    try testing.expect(server_conn.transport.isReady());
+    const result = ServerConnection.accept(allocator, config, init_data);
+    try testing.expectError(error.DeprecatedUseConnectionListener, result);
 }
 
 test "ConnectionConfig - default values" {

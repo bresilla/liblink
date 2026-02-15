@@ -55,20 +55,6 @@ pub const channels = @import("channels/channels.zig");
 
 pub const sftp = @import("sftp/sftp.zig");
 
-pub const sshfs = struct {
-    pub const filesystem = @import("sshfs/filesystem.zig");
-    pub const operations = @import("sshfs/operations.zig");
-    pub const inode_cache = @import("sshfs/inode_cache.zig");
-    pub const handle_manager = @import("sshfs/handle_manager.zig");
-    pub const dir_cache = @import("sshfs/dir_cache.zig");
-    pub const attr_cache = @import("sshfs/attr_cache.zig");
-};
-
-pub const fuse = struct {
-    pub const types = @import("fuse/types.zig");
-    pub const fuse = @import("fuse/fuse.zig");
-};
-
 pub const connection = @import("connection.zig");
 
 pub const platform = struct {

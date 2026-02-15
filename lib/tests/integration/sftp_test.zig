@@ -75,10 +75,16 @@ test "Integration: SFTP file operations structure" {
 test "Integration: SFTP directory operations structure" {
     std.log.info("=== Integration Test: SFTP Directory Operations ===", .{});
 
-    // Directory operations would be tested here
-    // When full integration is implemented
+    _ = syslink.sftp.protocol.Handle;
 
     std.log.info("✓ Directory operation structures validated", .{});
+}
+
+test "Integration: SFTP symlink operations available" {
+    _ = syslink.sftp.protocol.PacketType.SSH_FXP_READLINK;
+    _ = syslink.sftp.protocol.PacketType.SSH_FXP_SYMLINK;
+    _ = syslink.sftp.SftpClient.readlink;
+    _ = syslink.sftp.SftpClient.symlink;
 }
 
 test "Integration: SFTP error handling" {
@@ -145,10 +151,9 @@ test "Integration: SFTP open flags encoding" {
     std.log.info("✓ SFTP open flags validated", .{});
 }
 
-// TODO: Add full end-to-end SFTP integration tests when server threading is implemented
-// These would include:
-// - Starting SFTP server in background thread
-// - Connecting SFTP client
-// - Performing file upload/download
-// - Verifying file contents match
-// - Testing concurrent file operations
+test "Integration: SFTP server options include remote root" {
+    const opts = syslink.sftp.SftpServer.Options{
+        .remote_root = ".",
+    };
+    try testing.expectEqualStrings(".", opts.remote_root);
+}

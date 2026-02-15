@@ -16,6 +16,11 @@ const VERSION = "0.1.0";
 // Global flag for signal handling
 var should_exit = std.atomic.Value(bool).init(false);
 
+const SessionMode = enum {
+    shell,
+    subsystem_sftp,
+};
+
 /// Signal handler for Ctrl+C
 fn handleSigInt(sig: c_int) callconv(.c) void {
     _ = sig;
@@ -45,10 +50,6 @@ pub fn main() !void {
         try runExecCommand(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "sftp")) {
         try runSftpCommand(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "mount")) {
-        try runMountCommand(allocator, args[2..]);
-    } else if (std.mem.eql(u8, command, "umount") or std.mem.eql(u8, command, "unmount")) {
-        try runUmountCommand(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "-v") or std.mem.eql(u8, command, "--version")) {
         try printVersion();
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
@@ -62,7 +63,7 @@ pub fn main() !void {
 
 fn printVersion() !void {
     std.debug.print("sl version {s}\n", .{VERSION});
-    std.debug.print("SSH/QUIC implementation with SFTP and SSHFS support\n", .{});
+    std.debug.print("SSH/QUIC implementation with SFTP support\n", .{});
 }
 
 fn printHelp() !void {
@@ -83,8 +84,6 @@ fn printHelp() !void {
         \\    shell [user@]host[:port]    Connect to remote shell
         \\    exec [user@]host command    Execute remote command
         \\    sftp [user@]host[:port]     Start SFTP session
-        \\    mount [user@]host path      Mount remote filesystem (SSHFS)
-        \\    umount path                 Unmount SSHFS filesystem
         \\
         \\  GENERAL:
         \\    version                     Show version information
@@ -115,10 +114,6 @@ fn printHelp() !void {
         \\    sl shell testuser@192.168.1.100:2222
         \\    sl exec testuser@server.com "ls -la"
         \\    sl sftp testuser@example.com
-        \\
-        \\  Mount filesystem:
-        \\    sl mount testuser@server.com:/home/user ./mnt
-        \\    sl umount ./mnt
         \\
         \\SFTP COMMANDS (in sftp> prompt):
         \\    ls [path]                   List directory
@@ -234,18 +229,17 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
             return err;
         };
 
-        // Check if this was a shell/exec/subsystem request (not just pty-req)
-        // Shell handler creates PTY and stores it in active_shells
-        const has_pty = active_shells.contains(stream_id);
-
-        if (has_pty) {
+        if (session_modes.get(stream_id)) |_| {
             session_started = true;
             std.debug.print("✓ Session started\n", .{});
         }
     }
 
-    // Bridge I/O between PTY and SSH channel
-    try bridgeSession(server_conn, stream_id);
+    const mode = session_modes.get(stream_id) orelse return error.NoSessionMode;
+    switch (mode) {
+        .shell => try bridgeSession(server_conn, stream_id),
+        .subsystem_sftp => try runSftpSubsystem(server_conn, stream_id),
+    }
 }
 
 /// PTY request information
@@ -281,6 +275,9 @@ const PtySession = struct {
 
 /// Active shell sessions (stream_id -> PtySession)
 var active_shells = std.AutoHashMap(u64, PtySession).init(std.heap.page_allocator);
+
+/// Active session mode for each stream
+var session_modes = std.AutoHashMap(u64, SessionMode).init(std.heap.page_allocator);
 
 /// PTY request info for each session (stream_id -> PtyRequestInfo)
 var pty_requests = std.AutoHashMap(u64, PtyRequestInfo).init(std.heap.page_allocator);
@@ -362,6 +359,49 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
         var pty_session = entry.value;
         pty_session.deinit();
     }
+
+    _ = session_modes.fetchRemove(stream_id);
+}
+
+fn runSftpSubsystem(server_conn: *syslink.connection.ServerConnection, stream_id: u64) !void {
+    std.debug.print("Starting SFTP subsystem on stream {}...\n", .{stream_id});
+
+    var root_buf: [4096]u8 = undefined;
+    const sftp_root = std.process.getEnvVarOwned(server_conn.allocator, "SL_SFTP_ROOT") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    defer if (sftp_root) |root| server_conn.allocator.free(root);
+
+    const remote_root = if (sftp_root) |root|
+        root
+    else blk: {
+        const cwd = try std.posix.getcwd(&root_buf);
+        break :blk cwd;
+    };
+
+    const session_channel = syslink.channels.SessionChannel{
+        .manager = &server_conn.channel_manager,
+        .stream_id = stream_id,
+        .allocator = server_conn.allocator,
+    };
+
+    const sftp_channel = syslink.sftp.SftpChannel.init(server_conn.allocator, session_channel);
+    var sftp_server = try syslink.sftp.SftpServer.initWithOptions(server_conn.allocator, sftp_channel, .{
+        .remote_root = remote_root,
+    });
+    defer sftp_server.deinit();
+
+    sftp_server.run() catch |err| {
+        if (err != error.EndOfStream and err != error.ConnectionClosed) {
+            return err;
+        }
+    };
+
+    std.debug.print("SFTP subsystem ended on stream {}\n", .{stream_id});
+    server_conn.channel_manager.sendEof(stream_id) catch {};
+    server_conn.channel_manager.closeChannel(stream_id) catch {};
+    _ = session_modes.fetchRemove(stream_id);
 }
 
 /// PTY handler - called when client requests a PTY
@@ -445,6 +485,7 @@ fn shellHandler(stream_id: u64) !void {
         .pid = pid,
         .allocator = allocator,
     });
+    try session_modes.put(stream_id, .shell);
 
     std.debug.print("  ✓ Shell session ready on stream {}\n", .{stream_id});
 }
@@ -458,7 +499,12 @@ fn execHandler(stream_id: u64, command: []const u8) !void {
 /// Subsystem handler - called when client requests subsystem (e.g., sftp)
 fn subsystemHandler(stream_id: u64, subsystem_name: []const u8) !void {
     std.debug.print("  → Subsystem requested on stream {}: {s}\n", .{ stream_id, subsystem_name });
-    // TODO: Start subsystem (e.g., SFTP server)
+    if (std.mem.eql(u8, subsystem_name, "sftp")) {
+        try session_modes.put(stream_id, .subsystem_sftp);
+        return;
+    }
+
+    return error.UnsupportedSubsystem;
 }
 
 fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -1090,7 +1136,7 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const current_dir = "/";  // Simplified for demo
+    const current_dir = "/"; // Simplified for demo
 
     while (true) {
         try stdout.writeAll("sftp> ");
@@ -1337,39 +1383,6 @@ fn sftpRemove(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     try stdout.writeAll("Removed: ");
     try stdout.writeAll(path);
     try stdout.writeAll("\n");
-}
-
-// ============================================================================
-// SSHFS COMMANDS
-// ============================================================================
-
-fn runMountCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 2) {
-        std.debug.print("Error: Remote and mount point required\n", .{});
-        std.debug.print("Usage: sl mount [user@]host[:port]:/remote/path /local/mount\n", .{});
-        std.debug.print("Example: sl mount testuser@192.168.1.100:/home/user ./mnt\n", .{});
-        std.process.exit(1);
-    }
-
-    _ = allocator;
-    std.debug.print("SSHFS mount functionality:\n", .{});
-    std.debug.print("  Remote: {s}\n", .{args[0]});
-    std.debug.print("  Mount point: {s}\n", .{args[1]});
-    std.debug.print("\n", .{});
-    std.debug.print("Note: SSHFS/FUSE integration not yet implemented\n", .{});
-    std.debug.print("This would use lib/sshfs/ to mount remote filesystem via FUSE\n", .{});
-}
-
-fn runUmountCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len < 1) {
-        std.debug.print("Error: Mount point required\n", .{});
-        std.debug.print("Usage: sl umount /mount/point\n", .{});
-        std.process.exit(1);
-    }
-
-    _ = allocator;
-    std.debug.print("Unmounting: {s}\n", .{args[0]});
-    std.debug.print("Note: SSHFS/FUSE integration not yet implemented\n", .{});
 }
 
 /// Encode Ed25519 public key as SSH host key blob
