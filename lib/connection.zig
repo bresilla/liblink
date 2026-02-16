@@ -27,6 +27,12 @@ pub const ConnectionConfig = struct {
     /// Client QUIC transport parameters
     quic_params: []const u8 = "",
 
+    /// Trusted server host key fingerprints.
+    ///
+    /// If non-empty, server host key must match one of these fingerprints.
+    /// Fingerprint format: SHA256:<base64>
+    trusted_host_fingerprints: []const []const u8 = &[_][]const u8{},
+
     /// Random number generator
     random: std.Random,
 };
@@ -93,6 +99,7 @@ pub const ClientConnection = struct {
             server_name,
             config.quic_versions,
             config.quic_params,
+            config.trusted_host_fingerprints,
         );
         defer allocator.free(init_data);
 

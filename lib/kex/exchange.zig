@@ -79,6 +79,7 @@ pub const ClientKeyExchange = struct {
         server_name: []const u8,
         quic_versions: []const u32,
         quic_params: []const u8,
+        trusted_fingerprints: []const []const u8,
     ) ![]u8 {
         // Encode client ephemeral key data
         const client_kex_data = try self.ephemeral_key.encodeClientData(self.allocator);
@@ -91,7 +92,7 @@ pub const ClientKeyExchange = struct {
             .client_quic_versions = quic_versions,
             .client_quic_trnsp_params = quic_params,
             .client_sig_algs = constants.DEFAULT_SIG_ALGS,
-            .trusted_fingerprints = &[_][]const u8{},
+            .trusted_fingerprints = trusted_fingerprints,
             .client_kex_algs = &[_]kex_init.KexAlgorithm{
                 .{
                     .name = constants.KEX_CURVE25519_SHA256,
@@ -163,12 +164,20 @@ pub const ClientKeyExchange = struct {
             &server_data.public_key,
             &shared_secret,
         );
+        errdefer self.allocator.free(exchange_hash);
 
         // Verify server signature over exchange hash
         try verifyServerSignature(
             exchange_hash,
             server_data.signature,
             server_data.host_key,
+        );
+
+        // Verify server host key against trusted fingerprint set (if configured)
+        try verifyTrustedHostKey(
+            self.allocator,
+            server_data.host_key,
+            self.init_message.?.trusted_fingerprints,
         );
 
         // Derive QUIC secrets
@@ -556,6 +565,36 @@ fn verifyServerSignature(
     }
 }
 
+fn verifyTrustedHostKey(
+    allocator: Allocator,
+    host_key_blob: []const u8,
+    trusted_fingerprints: []const []const u8,
+) !void {
+    if (trusted_fingerprints.len == 0) return;
+
+    const fingerprint = try computeHostKeyFingerprint(allocator, host_key_blob);
+    defer allocator.free(fingerprint);
+
+    for (trusted_fingerprints) |trusted| {
+        if (std.mem.eql(u8, trusted, fingerprint)) return;
+    }
+
+    std.log.warn("Untrusted server host key fingerprint: {s}", .{fingerprint});
+    return error.UntrustedHostKey;
+}
+
+fn computeHostKeyFingerprint(allocator: Allocator, host_key_blob: []const u8) ![]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(host_key_blob, &digest, .{});
+
+    const b64_len = std.base64.standard.Encoder.calcSize(digest.len);
+    const b64 = try allocator.alloc(u8, b64_len);
+    defer allocator.free(b64);
+    _ = std.base64.standard.Encoder.encode(b64, &digest);
+
+    return std.fmt.allocPrint(allocator, "SHA256:{s}", .{b64});
+}
+
 /// Decode SSH signature blob
 ///
 /// Format: string("ssh-ed25519") || string(64-byte signature)
@@ -701,7 +740,7 @@ test "ClientKeyExchange - create init" {
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
-    const init_data = try client.createInit("example.com", &quic_versions, "");
+    const init_data = try client.createInit("example.com", &quic_versions, "", &[_][]const u8{});
     defer allocator.free(init_data);
 
     // Should be at least minimum size (1200 bytes)
@@ -720,7 +759,7 @@ test "Full key exchange - client and server" {
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
-    const init_data = try client.createInit("localhost", &quic_versions, "client_params");
+    const init_data = try client.createInit("localhost", &quic_versions, "client_params", &[_][]const u8{});
     defer allocator.free(init_data);
 
     // Server side
@@ -761,4 +800,78 @@ test "Full key exchange - client and server" {
 
     // Exchange hashes should match
     try testing.expectEqualSlices(u8, client.exchange_hash.?, server.exchange_hash.?);
+}
+
+test "Full key exchange - trusted host fingerprint enforcement" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(98765);
+    const random = prng.random();
+
+    const quic_versions = [_]u32{1};
+
+    // Generate server host keypair
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const ed_keypair = Ed25519.KeyPair.generate();
+
+    var host_private_key: [64]u8 = undefined;
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+
+    var host_public_key: [32]u8 = undefined;
+    @memcpy(&host_public_key, &ed_keypair.public_key.bytes);
+
+    const host_key = try encodeSshHostKey(allocator, &host_public_key);
+    defer allocator.free(host_key);
+
+    const trusted_fp = try computeHostKeyFingerprint(allocator, host_key);
+    defer allocator.free(trusted_fp);
+
+    // Happy path with trusted fingerprint
+    {
+        var client_ok = ClientKeyExchange.init(allocator, random);
+        defer client_ok.deinit();
+
+        const init_data = try client_ok.createInit("localhost", &quic_versions, "client_params", &[_][]const u8{trusted_fp});
+        defer allocator.free(init_data);
+
+        var server_ok = ServerKeyExchange.init(allocator, random);
+        defer server_ok.deinit();
+
+        const server_result = try server_ok.processInitAndCreateReply(
+            init_data,
+            &quic_versions,
+            "server_params",
+            host_key,
+            &host_private_key,
+        );
+        defer allocator.free(server_result.reply_data);
+
+        _ = try client_ok.processReply(server_result.reply_data);
+    }
+
+    // Failure path with mismatched trusted fingerprint
+    {
+        var client_bad = ClientKeyExchange.init(allocator, random);
+        defer client_bad.deinit();
+
+        const bad_fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        const init_data = try client_bad.createInit("localhost", &quic_versions, "client_params", &[_][]const u8{bad_fp});
+        defer allocator.free(init_data);
+
+        var server_bad = ServerKeyExchange.init(allocator, random);
+        defer server_bad.deinit();
+
+        const server_result = try server_bad.processInitAndCreateReply(
+            init_data,
+            &quic_versions,
+            "server_params",
+            host_key,
+            &host_private_key,
+        );
+        defer allocator.free(server_result.reply_data);
+
+        const result = client_bad.processReply(server_result.reply_data);
+        try testing.expectError(error.UntrustedHostKey, result);
+    }
 }
