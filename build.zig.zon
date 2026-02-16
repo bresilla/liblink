@@ -3,8 +3,8 @@
     .version = "0.0.4",
     .dependencies = .{
         .runquic = .{
-            .url = "https://github.com/bresilla/runquic/archive/c7249e9aecd350b3c56b63117fd6862a228ab033.tar.gz",
-            .hash = "runquic-0.0.3-ouOgH3lDBgAPZWNZSGswfqNzHgluyMrq8rkNXXvSPC3j",
+            .url = "https://github.com/bresilla/runquic/archive/refs/tags/0.0.4.tar.gz",
+            .hash = "runquic-0.0.4-ouOgH3lDBgDlydut3jZPtPdfij1GKIk6Z_Ygdwp6fWR-",
         },
     },
     .paths = .{
