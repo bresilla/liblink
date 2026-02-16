@@ -184,36 +184,29 @@ pub const ClientConnection = struct {
         const request_data = try auth_client.authenticatePassword(password);
         defer self.allocator.free(request_data);
 
-        // Open stream 0 for authentication (stream 0 should be first bidirectional stream)
-        _ = self.transport.openStream() catch |err| blk: {
-            // Stream might already exist, that's OK
-            std.log.debug("Stream 0 open result: {}", .{err});
-            break :blk 0;
-        };
+        try self.ensureAuthStreamOpen();
 
         // Send on stream 0 (authentication stream)
         try self.transport.sendOnStream(0, request_data);
 
-        // Poll for response (wait up to 5 seconds)
-        try self.transport.poll(5000);
-
-        // Receive response
-        var response_buffer: [4096]u8 = undefined;
-        const response_len = try self.transport.receiveFromStream(0, &response_buffer);
-        const response_data = response_buffer[0..response_len];
-
-        // Process response
-        var result = try auth_client.processResponse(response_data);
-        defer result.deinit(self.allocator);
-
-        return switch (result) {
-            .success => true,
-            .failure => false,
-            .banner => |b| {
-                std.log.info("Server banner: {s}", .{b.message});
-                return false; // Banner doesn't complete auth, wait for next response
-            },
-        };
+        while (true) {
+            var result = try self.receiveAuthResult(&auth_client);
+            switch (result) {
+                .success => {
+                    result.deinit(self.allocator);
+                    return true;
+                },
+                .failure => {
+                    result.deinit(self.allocator);
+                    return false;
+                },
+                .banner => |b| {
+                    std.log.info("Server banner: {s}", .{b.message});
+                    result.deinit(self.allocator);
+                    continue;
+                },
+            }
+        }
     }
 
     /// Authenticate with public key
@@ -228,6 +221,7 @@ pub const ClientConnection = struct {
         private_key: *const [64]u8,
     ) !bool {
         var auth_client = auth.AuthClient.init(self.allocator, username);
+        try self.ensureAuthStreamOpen();
 
         // Get exchange hash (session identifier) from key exchange
         const exchange_hash = self.kex.getExchangeHash();
@@ -244,19 +238,22 @@ pub const ClientConnection = struct {
 
             try self.transport.sendOnStream(0, query_data);
 
-            // Poll for response
-            try self.transport.poll(5000);
-
-            var response_buffer: [4096]u8 = undefined;
-            const response_len = try self.transport.receiveFromStream(0, &response_buffer);
-            const response_data = response_buffer[0..response_len];
-
-            var result = try auth_client.processResponse(response_data);
-            defer result.deinit(self.allocator);
-
-            // If server rejects the key, don't continue
-            if (result == .failure) {
-                return false;
+            while (true) {
+                var result = try self.receiveAuthResult(&auth_client);
+                switch (result) {
+                    .banner => {
+                        result.deinit(self.allocator);
+                        continue;
+                    },
+                    .failure => {
+                        result.deinit(self.allocator);
+                        return false;
+                    },
+                    .success => {
+                        result.deinit(self.allocator);
+                        break;
+                    },
+                }
             }
         }
 
@@ -272,43 +269,89 @@ pub const ClientConnection = struct {
 
             try self.transport.sendOnStream(0, auth_data);
 
-            // Poll for response
-            try self.transport.poll(5000);
-
-            var response_buffer: [4096]u8 = undefined;
-            const response_len = try self.transport.receiveFromStream(0, &response_buffer);
-            const response_data = response_buffer[0..response_len];
-
-            var result = try auth_client.processResponse(response_data);
-            defer result.deinit(self.allocator);
-
-            return result == .success;
+            while (true) {
+                var result = try self.receiveAuthResult(&auth_client);
+                switch (result) {
+                    .banner => {
+                        result.deinit(self.allocator);
+                        continue;
+                    },
+                    .success => {
+                        result.deinit(self.allocator);
+                        return true;
+                    },
+                    .failure => {
+                        result.deinit(self.allocator);
+                        return false;
+                    },
+                }
+            }
         }
     }
 
     /// Query available authentication methods
     pub fn queryAuthMethods(self: *Self, username: []const u8) ![]const []const u8 {
         var auth_client = auth.AuthClient.init(self.allocator, username);
+        try self.ensureAuthStreamOpen();
 
         const none_data = try auth_client.authenticateNone();
         defer self.allocator.free(none_data);
 
         try self.transport.sendOnStream(0, none_data);
 
-        // Poll for response
-        try self.transport.poll(5000);
+        while (true) {
+            var result = try self.receiveAuthResult(&auth_client);
+            switch (result) {
+                .banner => {
+                    result.deinit(self.allocator);
+                    continue;
+                },
+                .failure => |f| {
+                    // Caller owns returned methods memory.
+                    return f.methods;
+                },
+                .success => {
+                    result.deinit(self.allocator);
+                    return &[_][]const u8{};
+                },
+            }
+        }
+    }
 
-        var response_buffer: [4096]u8 = undefined;
-        const response_len = try self.transport.receiveFromStream(0, &response_buffer);
-        const response_data = response_buffer[0..response_len];
-
-        const result = try auth_client.processResponse(response_data);
-        // Don't defer deinit here - caller owns the methods list
-
-        return switch (result) {
-            .failure => |f| f.methods, // Return available methods
-            else => &[_][]const u8{}, // Unexpected success or banner
+    fn ensureAuthStreamOpen(self: *Self) !void {
+        _ = self.transport.openStream() catch |err| blk: {
+            // Stream might already exist, that's fine for stream 0 auth flow.
+            std.log.debug("Stream 0 open result: {}", .{err});
+            break :blk 0;
         };
+    }
+
+    fn receiveAuthResult(self: *Self, auth_client: *auth.AuthClient) !auth.AuthResult {
+        var response_buffer: [16384]u8 = undefined;
+        var total_received: usize = 0;
+        var attempts: usize = 0;
+
+        while (attempts < 300) : (attempts += 1) {
+            try self.transport.poll(100);
+
+            const len = self.transport.receiveFromStream(0, response_buffer[total_received..]) catch |err| {
+                if (err == error.NoData) continue;
+                return err;
+            };
+
+            if (len == 0) continue;
+            total_received += len;
+
+            const response_data = response_buffer[0..total_received];
+            return auth_client.processResponse(response_data) catch |err| {
+                if (err == error.EndOfBuffer or err == error.InvalidResponse) {
+                    continue;
+                }
+                return err;
+            };
+        }
+
+        return error.AuthenticationTimeout;
     }
 
     /// Open a new session channel
