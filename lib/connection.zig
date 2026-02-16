@@ -110,9 +110,8 @@ pub const ClientConnection = struct {
         // Initialize QUIC transport with SSH-derived secrets
         std.log.info("Initializing QUIC connection...", .{});
 
-        // TODO: Extract actual connection IDs from key exchange
-        const local_conn_id = "client-conn-id";
-        const remote_conn_id = "server-conn-id";
+        const local_conn_id = secrets.client_connection_id;
+        const remote_conn_id = secrets.server_connection_id;
 
         // Prepare server address for client to send packets to
         var server_storage: std.posix.sockaddr.storage = undefined;
@@ -645,9 +644,8 @@ pub const ConnectionListener = struct {
         // Initialize QUIC transport with derived secrets
         std.log.info("Initializing QUIC connection...", .{});
 
-        // TODO: Extract actual connection IDs from key exchange
-        const local_conn_id = "server-conn-id";
-        const remote_conn_id = "client-conn-id";
+        const local_conn_id = result.server_connection_id;
+        const remote_conn_id = result.client_connection_id;
 
         // Set client address for server socket (for sendto)
         self.udp_transport.socket.address = init_result.client_address;

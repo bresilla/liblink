@@ -18,6 +18,7 @@ var should_exit = std.atomic.Value(bool).init(false);
 
 const SessionMode = enum {
     shell,
+    exec,
     subsystem_sftp,
 };
 
@@ -238,6 +239,7 @@ fn handleSession(server_conn: *syslink.connection.ServerConnection) !void {
     const mode = session_modes.get(stream_id) orelse return error.NoSessionMode;
     switch (mode) {
         .shell => try bridgeSession(server_conn, stream_id),
+        .exec => try runExecRequest(server_conn, stream_id),
         .subsystem_sftp => try runSftpSubsystem(server_conn, stream_id),
     }
 }
@@ -275,6 +277,9 @@ const PtySession = struct {
 
 /// Active shell sessions (stream_id -> PtySession)
 var active_shells = std.AutoHashMap(u64, PtySession).init(std.heap.page_allocator);
+
+/// Active exec commands (stream_id -> command)
+var active_exec = std.AutoHashMap(u64, []u8).init(std.heap.page_allocator);
 
 /// Active session mode for each stream
 var session_modes = std.AutoHashMap(u64, SessionMode).init(std.heap.page_allocator);
@@ -360,6 +365,54 @@ fn bridgeSession(server_conn: *syslink.connection.ServerConnection, stream_id: u
         pty_session.deinit();
     }
 
+    _ = session_modes.fetchRemove(stream_id);
+
+    if (active_exec.fetchRemove(stream_id)) |entry| {
+        std.heap.page_allocator.free(entry.value);
+    }
+}
+
+fn sendExitStatus(server_conn: *syslink.connection.ServerConnection, stream_id: u64, status: u32) !void {
+    var status_data: [4]u8 = undefined;
+    std.mem.writeInt(u32, &status_data, status, .big);
+    try server_conn.channel_manager.sendRequest(stream_id, "exit-status", false, &status_data);
+}
+
+fn runExecRequest(server_conn: *syslink.connection.ServerConnection, stream_id: u64) !void {
+    const command = if (active_exec.fetchRemove(stream_id)) |entry|
+        entry.value
+    else
+        return error.MissingExecRequest;
+    defer std.heap.page_allocator.free(command);
+
+    std.debug.print("Running exec command on stream {}: {s}\n", .{ stream_id, command });
+
+    const argv = [_][]const u8{ "sh", "-c", command };
+    const result = try std.process.Child.run(.{
+        .allocator = server_conn.allocator,
+        .argv = &argv,
+        .max_output_bytes = 16 * 1024 * 1024,
+    });
+    defer server_conn.allocator.free(result.stdout);
+    defer server_conn.allocator.free(result.stderr);
+
+    if (result.stdout.len > 0) {
+        try server_conn.channel_manager.sendData(stream_id, result.stdout);
+    }
+    if (result.stderr.len > 0) {
+        try server_conn.channel_manager.sendData(stream_id, result.stderr);
+    }
+
+    var exit_code: u32 = 1;
+    switch (result.term) {
+        .Exited => |code| exit_code = code,
+        .Signal => |sig| exit_code = 128 + @as(u32, @intCast(sig)),
+        else => {},
+    }
+
+    try sendExitStatus(server_conn, stream_id, exit_code);
+    server_conn.channel_manager.sendEof(stream_id) catch {};
+    server_conn.channel_manager.closeChannel(stream_id) catch {};
     _ = session_modes.fetchRemove(stream_id);
 }
 
@@ -493,7 +546,16 @@ fn shellHandler(stream_id: u64) !void {
 /// Exec handler - called when client requests command execution
 fn execHandler(stream_id: u64, command: []const u8) !void {
     std.debug.print("  → Exec requested on stream {}: {s}\n", .{ stream_id, command });
-    // TODO: Execute command and return output
+
+    const command_copy = try std.heap.page_allocator.dupe(u8, command);
+    errdefer std.heap.page_allocator.free(command_copy);
+
+    if (active_exec.fetchRemove(stream_id)) |entry| {
+        std.heap.page_allocator.free(entry.value);
+    }
+
+    try active_exec.put(stream_id, command_copy);
+    try session_modes.put(stream_id, .exec);
 }
 
 /// Subsystem handler - called when client requests subsystem (e.g., sftp)
@@ -556,19 +618,34 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    if (host_key_path) |_| {
-        std.debug.print("Note: Host key loading not yet implemented, using generated key\n", .{});
+    var host_private_key: [64]u8 = undefined;
+    var host_public_key: [32]u8 = undefined;
+
+    if (host_key_path) |path| {
+        var parsed = try syslink.auth.keyfile.parsePrivateKeyFile(allocator, path);
+        defer parsed.deinit();
+
+        if (parsed.key_type != .ed25519) {
+            std.debug.print("Error: Host key must be Ed25519\n", .{});
+            return error.UnsupportedHostKeyType;
+        }
+        if (parsed.private_key.len != host_private_key.len or parsed.public_key.len != host_public_key.len) {
+            std.debug.print("Error: Invalid Ed25519 host key lengths\n", .{});
+            return error.InvalidHostKey;
+        }
+
+        @memcpy(&host_private_key, parsed.private_key[0..host_private_key.len]);
+        @memcpy(&host_public_key, parsed.public_key[0..host_public_key.len]);
+        std.debug.print("✓ Loaded host key from {s}\n", .{path});
+    } else {
+        const Ed25519 = std.crypto.sign.Ed25519;
+        const ed_keypair = Ed25519.KeyPair.generate();
+        @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+        @memcpy(&host_public_key, &ed_keypair.public_key.bytes);
     }
 
-    // Generate Ed25519 keypair properly
-    const Ed25519 = std.crypto.sign.Ed25519;
-    const ed_keypair = Ed25519.KeyPair.generate();
-
-    var host_private_key: [64]u8 = undefined;
-    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
-
     // Encode host key as proper SSH blob
-    const host_key_blob = try encodeHostKeyBlob(allocator, &ed_keypair.public_key.bytes);
+    const host_key_blob = try encodeHostKeyBlob(allocator, &host_public_key);
     defer allocator.free(host_key_blob);
 
     std.debug.print("Starting server...\n", .{});

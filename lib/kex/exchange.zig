@@ -9,6 +9,21 @@ const shared_secrets = @import("shared_secrets.zig");
 const crypto = @import("../crypto/crypto.zig");
 const constants = @import("../common/constants.zig");
 
+pub const ClientKexResult = struct {
+    client_secret: [32]u8,
+    server_secret: [32]u8,
+    client_connection_id: []const u8,
+    server_connection_id: []const u8,
+};
+
+pub const ServerKexResult = struct {
+    reply_data: []u8,
+    client_secret: [32]u8,
+    server_secret: [32]u8,
+    client_connection_id: []const u8,
+    server_connection_id: []const u8,
+};
+
 /// Client key exchange state machine
 pub const ClientKeyExchange = struct {
     allocator: Allocator,
@@ -103,7 +118,7 @@ pub const ClientKeyExchange = struct {
     pub fn processReply(
         self: *Self,
         reply_data: []const u8,
-    ) !struct { client_secret: [32]u8, server_secret: [32]u8 } {
+    ) !ClientKexResult {
         // Decode SSH_QUIC_REPLY
         var reply = try kex_reply.SshQuicReply.decode(self.allocator, reply_data);
         errdefer reply.deinit(self.allocator);
@@ -171,6 +186,8 @@ pub const ClientKeyExchange = struct {
         return .{
             .client_secret = quic_secrets.client_secret,
             .server_secret = quic_secrets.server_secret,
+            .client_connection_id = reply.client_connection_id,
+            .server_connection_id = reply.server_connection_id,
         };
     }
 
@@ -188,6 +205,7 @@ pub const ServerKeyExchange = struct {
     random: std.Random,
     ephemeral_key: ?kex_curve25519.ServerEphemeralKey,
     init_message: ?kex_init.SshQuicInit,
+    server_connection_id: ?[]u8,
     shared_secret: ?[32]u8,
     exchange_hash: ?[]u8,
 
@@ -199,6 +217,7 @@ pub const ServerKeyExchange = struct {
             .random = random,
             .ephemeral_key = null,
             .init_message = null,
+            .server_connection_id = null,
             .shared_secret = null,
             .exchange_hash = null,
         };
@@ -207,6 +226,9 @@ pub const ServerKeyExchange = struct {
     pub fn deinit(self: *Self) void {
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
+        }
+        if (self.server_connection_id) |conn_id| {
+            self.allocator.free(conn_id);
         }
         if (self.exchange_hash) |hash| {
             self.allocator.free(hash);
@@ -230,7 +252,7 @@ pub const ServerKeyExchange = struct {
         quic_params: []const u8,
         host_key: []const u8,
         host_private_key: *const [64]u8,
-    ) !struct { reply_data: []u8, client_secret: [32]u8, server_secret: [32]u8 } {
+    ) !ServerKexResult {
         // Decode SSH_QUIC_INIT
         var init_msg = try kex_init.SshQuicInit.decode(self.allocator, init_data);
         errdefer init_msg.deinit(self.allocator);
@@ -270,7 +292,6 @@ pub const ServerKeyExchange = struct {
 
         // Generate server connection ID (needed for exchange hash)
         const server_conn_id = try generateConnectionId(self.random, self.allocator);
-        defer self.allocator.free(server_conn_id);
 
         // Encode reply content without kex data for hash calculation
         const reply_without_kex = try encodeReplyWithoutKexFromParams(
@@ -331,6 +352,7 @@ pub const ServerKeyExchange = struct {
         // Save state
         self.ephemeral_key = server_ephemeral;
         self.init_message = init_msg;
+        self.server_connection_id = server_conn_id;
         self.shared_secret = shared_secret;
         self.exchange_hash = exchange_hash;
 
@@ -338,6 +360,8 @@ pub const ServerKeyExchange = struct {
             .reply_data = reply_data,
             .client_secret = quic_secrets.client_secret,
             .server_secret = quic_secrets.server_secret,
+            .client_connection_id = self.init_message.?.client_connection_id,
+            .server_connection_id = server_conn_id,
         };
     }
 
