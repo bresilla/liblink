@@ -286,6 +286,9 @@ var active_exec = std.AutoHashMap(u64, []u8).init(std.heap.page_allocator);
 /// Active session mode for each stream
 var session_modes = std.AutoHashMap(u64, SessionMode).init(std.heap.page_allocator);
 
+/// Authenticated username for current connection/session lifecycle
+var current_authenticated_user: ?[]u8 = null;
+
 /// PTY request info for each session (stream_id -> PtyRequestInfo)
 var pty_requests = std.AutoHashMap(u64, PtyRequestInfo).init(std.heap.page_allocator);
 
@@ -389,10 +392,21 @@ fn runExecRequest(server_conn: *syslink.connection.ServerConnection, stream_id: 
 
     std.debug.print("Running exec command on stream {}: {s}\n", .{ stream_id, command });
 
-    const argv = [_][]const u8{ "sh", "-c", command };
+    const auth_user = current_authenticated_user orelse return error.NoAuthenticatedUser;
+
+    var argv_list = std.ArrayListUnmanaged([]const u8){};
+    defer argv_list.deinit(server_conn.allocator);
+
+    try argv_list.append(server_conn.allocator, "su");
+    try argv_list.append(server_conn.allocator, "-s");
+    try argv_list.append(server_conn.allocator, "/bin/sh");
+    try argv_list.append(server_conn.allocator, auth_user);
+    try argv_list.append(server_conn.allocator, "-c");
+    try argv_list.append(server_conn.allocator, command);
+
     const result = try std.process.Child.run(.{
         .allocator = server_conn.allocator,
-        .argv = &argv,
+        .argv = argv_list.items,
         .max_output_bytes = 16 * 1024 * 1024,
     });
     defer server_conn.allocator.free(result.stdout);
@@ -431,6 +445,17 @@ fn runSftpSubsystem(server_conn: *syslink.connection.ServerConnection, stream_id
     const remote_root = if (sftp_root) |root|
         root
     else blk: {
+        if (current_authenticated_user) |user| {
+            var user_buf: [256]u8 = undefined;
+            if (user.len > 0 and user.len < user_buf.len) {
+                @memcpy(user_buf[0..user.len], user);
+                user_buf[user.len] = 0;
+                if (c.getpwnam(@ptrCast(&user_buf[0]))) |pw| {
+                    if (pw.*.pw_dir != null) break :blk std.mem.span(pw.*.pw_dir);
+                }
+            }
+        }
+
         const cwd = try std.posix.getcwd(&root_buf);
         break :blk cwd;
     };
@@ -504,8 +529,17 @@ fn shellHandler(stream_id: u64) !void {
         try pty.setWindowSize(24, 80);
     }
 
-    // Get user info and prepare environment
-    const user_info_ptr = c.getpwnam("bresilla") orelse c.getpwnam("root");
+    // Get authenticated user info and prepare environment
+    const auth_user = current_authenticated_user orelse return error.NoAuthenticatedUser;
+
+    var username_buf: [256]u8 = undefined;
+    if (auth_user.len == 0 or auth_user.len >= username_buf.len) {
+        return error.InvalidUsername;
+    }
+    @memcpy(username_buf[0..auth_user.len], auth_user);
+    username_buf[auth_user.len] = 0;
+
+    const user_info_ptr = c.getpwnam(@ptrCast(&username_buf[0]));
     if (user_info_ptr == null) {
         return error.UserNotFound;
     }
@@ -771,7 +805,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         };
 
-        const authed = server_conn.handleAuthentication(
+        const authenticated_user = server_conn.handleAuthenticationIdentity(
             null,
             Validators.keyValidator,
         ) catch |err| {
@@ -779,12 +813,24 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         };
 
-        if (!authed) {
+        if (authenticated_user == null) {
             std.debug.print("✗ Authentication failed\n\n", .{});
             continue;
         }
 
-        std.debug.print("✓ Client authenticated\n", .{});
+        if (current_authenticated_user) |old_user| {
+            allocator.free(old_user);
+            current_authenticated_user = null;
+        }
+        current_authenticated_user = authenticated_user;
+        defer {
+            if (current_authenticated_user) |user| {
+                allocator.free(user);
+                current_authenticated_user = null;
+            }
+        }
+
+        std.debug.print("✓ Client authenticated as {s}\n", .{current_authenticated_user.?});
 
         // Handle session channels
         handleSession(server_conn) catch |err| {

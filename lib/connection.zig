@@ -498,6 +498,21 @@ pub const ServerConnection = struct {
         password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !bool {
+        const identity = try self.handleAuthenticationIdentity(password_validator, publickey_validator);
+        if (identity) |user| {
+            self.allocator.free(user);
+            return true;
+        }
+        return false;
+    }
+
+    /// Handle authentication and return authenticated username on success.
+    /// Caller owns returned memory when non-null.
+    pub fn handleAuthenticationIdentity(
+        self: *Self,
+        password_validator: ?auth.AuthServer.PasswordValidator,
+        publickey_validator: ?auth.AuthServer.PublicKeyValidator,
+    ) !?[]u8 {
         std.log.info("Waiting for authentication request...", .{});
 
         var auth_server = auth.AuthServer.init(self.allocator);
@@ -551,7 +566,11 @@ pub const ServerConnection = struct {
 
             if (response.success) {
                 std.log.info("✓ Authentication successful", .{});
-                return true;
+                if (response.authenticated_username) |user| {
+                    const user_copy = try self.allocator.dupe(u8, user);
+                    return user_copy;
+                }
+                return null;
             }
 
             if (response.data.len >= 1 and response.data[0] == constants.SSH_MSG.USERAUTH_PK_OK) {
@@ -564,11 +583,11 @@ pub const ServerConnection = struct {
                 continue;
             }
 
-            return false;
+            return null;
         }
 
         std.log.warn("✗ Authentication failed after maximum attempts", .{});
-        return false;
+        return null;
     }
 
     /// Send authentication banner to client

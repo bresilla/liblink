@@ -79,7 +79,7 @@ pub const AuthServer = struct {
     fn handlePasswordAuth(self: *Self, username: []const u8, password: []const u8) !AuthResponse {
         if (self.password_validator) |validator| {
             if (validator(username, password)) {
-                return self.createSuccess();
+                return self.createSuccess(username);
             }
         }
 
@@ -166,7 +166,7 @@ pub const AuthServer = struct {
         const valid = crypto.signature.verifyEd25519(sig_data, &signature_bytes, &public_key);
 
         if (valid) {
-            return self.createSuccess();
+            return self.createSuccess(username);
         } else {
             return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
         }
@@ -246,11 +246,14 @@ pub const AuthServer = struct {
     }
 
     /// Create success response
-    fn createSuccess(self: *Self) !AuthResponse {
+    fn createSuccess(self: *Self, username: []const u8) !AuthResponse {
         const data = try userauth.UserauthSuccess.encode(self.allocator);
+        const user_copy = try self.allocator.dupe(u8, username);
+        errdefer self.allocator.free(user_copy);
         return AuthResponse{
             .success = true,
             .data = data,
+            .authenticated_username = user_copy,
         };
     }
 
@@ -280,6 +283,7 @@ pub const AuthServer = struct {
         return AuthResponse{
             .success = false,
             .data = data,
+            .authenticated_username = null,
         };
     }
 
@@ -293,6 +297,7 @@ pub const AuthServer = struct {
         return AuthResponse{
             .success = false,
             .data = data,
+            .authenticated_username = null,
         };
     }
 
@@ -311,9 +316,13 @@ pub const AuthServer = struct {
 pub const AuthResponse = struct {
     success: bool,
     data: []u8, // Encoded message to send to client
+    authenticated_username: ?[]u8,
 
     pub fn deinit(self: *AuthResponse, allocator: Allocator) void {
         allocator.free(self.data);
+        if (self.authenticated_username) |user| {
+            allocator.free(user);
+        }
     }
 };
 
