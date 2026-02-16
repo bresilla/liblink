@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const runquic_transport = @import("runquic_transport");
+const quic_transport = @import("network/quic_transport.zig");
 
 // Import modules
 const kex_exchange = @import("kex/exchange.zig");
@@ -58,7 +58,7 @@ pub const ServerConfig = struct {
 /// Active SSH/QUIC client connection
 pub const ClientConnection = struct {
     allocator: Allocator,
-    transport: *runquic_transport.QuicTransport,
+    transport: *quic_transport.QuicTransport,
     kex: kex_exchange.ClientKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -118,10 +118,10 @@ pub const ClientConnection = struct {
         const server_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&udp_transport.socket.address.any);
         @memcpy(std.mem.asBytes(&server_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(server_sockaddr_ptr));
 
-        const transport = try allocator.create(runquic_transport.QuicTransport);
+        const transport = try allocator.create(quic_transport.QuicTransport);
         errdefer allocator.destroy(transport);
 
-        transport.* = try runquic_transport.QuicTransport.init(
+        transport.* = try quic_transport.QuicTransport.init(
             allocator,
             udp_transport.socket.socket, // Reuse UDP socket
             local_conn_id,
@@ -380,7 +380,7 @@ pub const ClientConnection = struct {
 /// Active SSH/QUIC server connection handler
 pub const ServerConnection = struct {
     allocator: Allocator,
-    transport: runquic_transport.QuicTransport,
+    transport: quic_transport.QuicTransport,
     kex: kex_exchange.ServerKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -655,7 +655,7 @@ pub const ConnectionListener = struct {
         const client_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&init_result.client_address.any);
         @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
 
-        var transport = try runquic_transport.QuicTransport.init(
+        var transport = try quic_transport.QuicTransport.init(
             self.allocator,
             self.udp_transport.socket.socket, // Reuse UDP socket
             local_conn_id,
