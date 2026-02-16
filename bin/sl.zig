@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 
 const c = @cImport({
     @cInclude("pwd.h");
+    @cInclude("signal.h");
     @cInclude("unistd.h");
     @cInclude("string.h");
     @cInclude("sys/ioctl.h");
@@ -12,6 +13,7 @@ const c = @cImport({
 });
 
 const VERSION = "0.0.4";
+const PID_FILE = "/tmp/syslink-server.pid";
 
 // Global flag for signal handling
 var should_exit = std.atomic.Value(bool).init(false);
@@ -573,6 +575,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var listen_addr: []const u8 = "0.0.0.0";
     var listen_port: u16 = 2222;
     var daemon_mode = false;
+    var foreground_internal = false;
     var host_key_path: ?[]const u8 = null;
 
     // Parse arguments
@@ -598,6 +601,8 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
             listen_addr = args[i];
         } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--daemon")) {
             daemon_mode = true;
+        } else if (std.mem.eql(u8, arg, "--foreground-internal")) {
+            foreground_internal = true;
         } else if (std.mem.eql(u8, arg, "-k") or std.mem.eql(u8, arg, "--host-key")) {
             i += 1;
             if (i >= args.len) {
@@ -613,6 +618,42 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("  Listen: {s}:{d}\n", .{ listen_addr, listen_port });
     std.debug.print("  Daemon: {}\n", .{daemon_mode});
     std.debug.print("  Auth: System users (like SSH)\n\n", .{});
+
+    if (daemon_mode and !foreground_internal) {
+        const exe_path = try std.fs.selfExePathAlloc(allocator);
+        defer allocator.free(exe_path);
+
+        var child_args = std.ArrayListUnmanaged([]const u8){};
+        defer child_args.deinit(allocator);
+
+        try child_args.append(allocator, exe_path);
+        try child_args.append(allocator, "server");
+        try child_args.append(allocator, "start");
+        try child_args.append(allocator, "--foreground-internal");
+        try child_args.append(allocator, "--host");
+        try child_args.append(allocator, listen_addr);
+
+        const port_arg = try std.fmt.allocPrint(allocator, "{}", .{listen_port});
+        defer allocator.free(port_arg);
+        try child_args.append(allocator, "--port");
+        try child_args.append(allocator, port_arg);
+
+        if (host_key_path) |path| {
+            try child_args.append(allocator, "--host-key");
+            try child_args.append(allocator, path);
+        }
+
+        var child = std.process.Child.init(child_args.items, allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+
+        try writePidFile(child.id);
+        std.debug.print("✓ Server started in daemon mode (pid {})\n", .{child.id});
+        std.debug.print("Use `sl server status` to check health and `sl server stop` to stop it.\n", .{});
+        return;
+    }
 
     // Generate or load host key
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
@@ -668,10 +709,6 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer listener.deinit();
 
     std.debug.print("✓ Server listening on {s}:{d}\n\n", .{ listen_addr, listen_port });
-
-    if (daemon_mode) {
-        std.debug.print("Note: Daemon mode not yet implemented, running in foreground\n", .{});
-    }
 
     std.debug.print("Ready for connections. Press Ctrl+C to stop.\n\n", .{});
 
@@ -739,18 +776,76 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+fn writePidFile(pid: std.process.Child.Id) !void {
+    var file = try std.fs.cwd().createFile(PID_FILE, .{ .truncate = true });
+    defer file.close();
+
+    var buffer: [32]u8 = undefined;
+    const pid_text = try std.fmt.bufPrint(&buffer, "{}\n", .{pid});
+    try file.writeAll(pid_text);
+}
+
+fn readPidFile(allocator: std.mem.Allocator) !std.posix.pid_t {
+    const file = try std.fs.cwd().openFile(PID_FILE, .{});
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 64);
+    defer allocator.free(content);
+
+    const trimmed = std.mem.trim(u8, content, &std.ascii.whitespace);
+    return try std.fmt.parseInt(std.posix.pid_t, trimmed, 10);
+}
+
+fn removePidFile() void {
+    std.fs.cwd().deleteFile(PID_FILE) catch {};
+}
+
+fn processAlive(pid: std.posix.pid_t) bool {
+    const rc = c.kill(pid, 0);
+    return rc == 0;
+}
+
 fn serverStop(allocator: std.mem.Allocator) !void {
-    _ = allocator;
     std.debug.print("Stopping SSH/QUIC server...\n", .{});
-    std.debug.print("Note: Daemon management not yet implemented\n", .{});
-    std.debug.print("To stop a running server, use: pkill -f 'sl server'\n", .{});
+
+    const pid = readPidFile(allocator) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("No pid file found ({s}). Server may not be running as daemon.\n", .{PID_FILE});
+            return;
+        },
+        else => return err,
+    };
+
+    if (!processAlive(pid)) {
+        std.debug.print("Stale pid file found for pid {}. Cleaning up.\n", .{pid});
+        removePidFile();
+        return;
+    }
+
+    if (c.kill(pid, c.SIGTERM) != 0) {
+        return error.FailedToSignalProcess;
+    }
+
+    removePidFile();
+    std.debug.print("✓ Sent SIGTERM to server pid {}\n", .{pid});
 }
 
 fn serverStatus(allocator: std.mem.Allocator) !void {
-    _ = allocator;
     std.debug.print("Checking server status...\n", .{});
-    std.debug.print("Note: Status checking not yet implemented\n", .{});
-    std.debug.print("To check manually: ps aux | grep 'sl server'\n", .{});
+
+    const pid = readPidFile(allocator) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("Server not running (no pid file at {s}).\n", .{PID_FILE});
+            return;
+        },
+        else => return err,
+    };
+
+    if (processAlive(pid)) {
+        std.debug.print("✓ Server is running (pid {})\n", .{pid});
+    } else {
+        std.debug.print("Server is not running, but pid file exists (stale pid {}).\n", .{pid});
+    }
 }
 
 // ============================================================================
