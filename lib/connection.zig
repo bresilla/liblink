@@ -460,26 +460,38 @@ pub const ServerConnection = struct {
             std.log.debug("Public key authentication enabled", .{});
         }
 
-        // Poll for incoming authentication request (wait up to 30 seconds)
-        try self.transport.poll(30000);
+        var request_buffer: [16384]u8 = undefined;
+        var total_received: usize = 0;
+        var attempts: usize = 0;
 
-        // Receive authentication request on stream 0
-        var request_buffer: [4096]u8 = undefined;
-        const request_len = self.transport.receiveFromStream(0, &request_buffer) catch |err| {
-            std.log.err("Failed to receive authentication request: {}", .{err});
-            return err;
-        };
-        const request_data = request_buffer[0..request_len];
+        var response: auth.AuthResponse = blk: {
+            while (attempts < 300) : (attempts += 1) {
+                try self.transport.poll(100);
 
-        std.log.debug("Received authentication request ({} bytes)", .{request_len});
+                const len = self.transport.receiveFromStream(0, request_buffer[total_received..]) catch |err| {
+                    if (err == error.NoData) continue;
+                    std.log.err("Failed to receive authentication request: {}", .{err});
+                    return err;
+                };
 
-        // Get exchange hash from key exchange
-        const exchange_hash = self.kex.getExchangeHash();
+                if (len == 0) continue;
+                total_received += len;
 
-        // Process authentication request
-        var response = auth_server.processRequest(request_data, exchange_hash) catch |err| {
-            std.log.err("Failed to process authentication request: {}", .{err});
-            return err;
+                const request_data = request_buffer[0..total_received];
+                const exchange_hash = self.kex.getExchangeHash();
+
+                const auth_response = auth_server.processRequest(request_data, exchange_hash) catch |err| {
+                    if (err == error.EndOfBuffer) {
+                        continue;
+                    }
+                    std.log.err("Failed to process authentication request: {}", .{err});
+                    return err;
+                };
+
+                break :blk auth_response;
+            }
+
+            return error.AuthenticationTimeout;
         };
         defer response.deinit(self.allocator);
 
