@@ -7,7 +7,6 @@ const crypto = @import("../crypto/crypto.zig");
 ///
 /// Handles server-side authentication after key exchange is complete.
 /// Validates credentials and manages authentication state.
-
 pub const AuthServer = struct {
     allocator: Allocator,
     service_name: []const u8,
@@ -108,9 +107,7 @@ pub const AuthServer = struct {
         // If no signature provided, this is a query - respond with success indicator
         // (client will retry with signature)
         if (pk_data.signature == null) {
-            // For query, we respond with SSH_MSG_USERAUTH_PK_OK (60)
-            // But for simplicity, we'll treat this as failure with publickey method available
-            return self.createFailure(&[_][]const u8{"publickey"}, false);
+            return self.createPkOk(pk_data.algorithm_name, pk_data.public_key_blob);
         }
 
         // Verify signature
@@ -193,6 +190,7 @@ pub const AuthServer = struct {
         size += 4 + username.len; // string(username)
         size += 4 + self.service_name.len; // string(service)
         size += 4 + publickey_str.len; // string("publickey")
+        size += 1; // boolean TRUE (signature included)
         size += 4 + algorithm_name.len; // string(algorithm)
         size += 4 + public_key_blob.len; // string(public_key_blob)
 
@@ -228,6 +226,10 @@ pub const AuthServer = struct {
         offset += 4;
         @memcpy(sig_data[offset .. offset + publickey_str.len], publickey_str);
         offset += publickey_str.len;
+
+        // boolean TRUE (signature included)
+        sig_data[offset] = 1;
+        offset += 1;
 
         // string(algorithm)
         std.mem.writeInt(u32, sig_data[offset..][0..4], @intCast(algorithm_name.len), .big);
@@ -274,6 +276,19 @@ pub const AuthServer = struct {
             self.allocator.free(method);
         }
         self.allocator.free(methods_owned);
+
+        return AuthResponse{
+            .success = false,
+            .data = data,
+        };
+    }
+
+    fn createPkOk(self: *Self, algorithm_name: []const u8, public_key_blob: []const u8) !AuthResponse {
+        const pk_ok = userauth.UserauthPkOk{
+            .algorithm_name = algorithm_name,
+            .public_key_blob = public_key_blob,
+        };
+        const data = try pk_ok.encode(self.allocator);
 
         return AuthResponse{
             .success = false,
@@ -395,6 +410,40 @@ test "AuthServer - none method returns available methods" {
     defer failure.deinit(allocator);
 
     try testing.expectEqual(@as(usize, 2), failure.authentications_continue.len);
+}
+
+test "AuthServer - public key query returns pk_ok" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var server = AuthServer.init(allocator);
+    server.setPublicKeyValidator(testPublicKeyValidator);
+
+    const fake_public_key_blob = "ssh-ed25519-key-blob";
+    var request = userauth.UserauthRequest{
+        .username = "testuser",
+        .service_name = "ssh-connection",
+        .method_name = "publickey",
+        .method_data = .{ .publickey = .{
+            .algorithm_name = "ssh-ed25519",
+            .public_key_blob = fake_public_key_blob,
+            .signature = null,
+        } },
+    };
+
+    const request_data = try request.encode(allocator);
+    defer allocator.free(request_data);
+
+    var response = try server.processRequest(request_data, "dummy_hash");
+    defer response.deinit(allocator);
+
+    try testing.expect(!response.success);
+    try testing.expectEqual(@as(u8, 60), response.data[0]); // SSH_MSG_USERAUTH_PK_OK
+
+    var pk_ok = try userauth.UserauthPkOk.decode(allocator, response.data);
+    defer pk_ok.deinit(allocator);
+    try testing.expectEqualStrings("ssh-ed25519", pk_ok.algorithm_name);
+    try testing.expectEqualStrings(fake_public_key_blob, pk_ok.public_key_blob);
 }
 
 test "AuthServer - banner message" {

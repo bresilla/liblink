@@ -7,7 +7,6 @@ const crypto = @import("../crypto/crypto.zig");
 ///
 /// Handles client-side authentication after key exchange is complete.
 /// Supports password and public key authentication methods.
-
 pub const AuthClient = struct {
     allocator: Allocator,
     username: []const u8,
@@ -58,6 +57,7 @@ pub const AuthClient = struct {
             sig_data_size += 4 + self.username.len; // string(username)
             sig_data_size += 4 + self.service_name.len; // string(service)
             sig_data_size += 4 + 9; // string("publickey")
+            sig_data_size += 1; // boolean TRUE (signature included)
             sig_data_size += 4 + algorithm_name.len; // string(algorithm)
             sig_data_size += 4 + public_key_blob.len; // string(public_key_blob)
 
@@ -95,6 +95,10 @@ pub const AuthClient = struct {
             offset += 4;
             @memcpy(sig_data[offset .. offset + publickey_str.len], publickey_str);
             offset += publickey_str.len;
+
+            // boolean TRUE (signature included)
+            sig_data[offset] = 1;
+            offset += 1;
 
             // string(algorithm)
             std.mem.writeInt(u32, sig_data[offset..][0..4], @intCast(algorithm_name.len), .big);
@@ -176,6 +180,11 @@ pub const AuthClient = struct {
                     },
                 };
             },
+            60 => blk: { // SSH_MSG_USERAUTH_PK_OK
+                var pk_ok = try userauth.UserauthPkOk.decode(self.allocator, response_data);
+                defer pk_ok.deinit(self.allocator);
+                break :blk AuthResult{ .pk_ok = {} };
+            },
             53 => blk: { // SSH_MSG_USERAUTH_BANNER
                 const banner = try userauth.UserauthBanner.decode(self.allocator, response_data);
                 break :blk AuthResult{
@@ -197,6 +206,7 @@ pub const AuthResult = union(enum) {
         methods: []const []const u8,
         partial_success: bool,
     },
+    pk_ok: void,
     banner: struct {
         message: []const u8,
         language_tag: []const u8,
@@ -211,6 +221,7 @@ pub const AuthResult = union(enum) {
                 }
                 allocator.free(f.methods);
             },
+            .pk_ok => {},
             .banner => |b| {
                 allocator.free(b.message);
                 allocator.free(b.language_tag);

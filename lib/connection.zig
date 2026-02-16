@@ -207,6 +207,10 @@ pub const ClientConnection = struct {
                     result.deinit(self.allocator);
                     return false;
                 },
+                .pk_ok => {
+                    result.deinit(self.allocator);
+                    continue;
+                },
                 .banner => |b| {
                     std.log.info("Server banner: {s}", .{b.message});
                     result.deinit(self.allocator);
@@ -252,6 +256,10 @@ pub const ClientConnection = struct {
                         result.deinit(self.allocator);
                         continue;
                     },
+                    .pk_ok => {
+                        result.deinit(self.allocator);
+                        break;
+                    },
                     .failure => {
                         result.deinit(self.allocator);
                         return false;
@@ -283,6 +291,10 @@ pub const ClientConnection = struct {
                         result.deinit(self.allocator);
                         continue;
                     },
+                    .pk_ok => {
+                        result.deinit(self.allocator);
+                        continue;
+                    },
                     .success => {
                         result.deinit(self.allocator);
                         return true;
@@ -310,6 +322,10 @@ pub const ClientConnection = struct {
             var result = try self.receiveAuthResult(&auth_client);
             switch (result) {
                 .banner => {
+                    result.deinit(self.allocator);
+                    continue;
+                },
+                .pk_ok => {
                     result.deinit(self.allocator);
                     continue;
                 },
@@ -494,51 +510,65 @@ pub const ServerConnection = struct {
             std.log.debug("Public key authentication enabled", .{});
         }
 
-        var request_buffer: [16384]u8 = undefined;
-        var total_received: usize = 0;
-        var attempts: usize = 0;
+        var auth_rounds: usize = 0;
+        while (auth_rounds < 10) : (auth_rounds += 1) {
+            var request_buffer: [16384]u8 = undefined;
+            var total_received: usize = 0;
+            var attempts: usize = 0;
 
-        var response: auth.AuthResponse = blk: {
-            while (attempts < 300) : (attempts += 1) {
-                try self.transport.poll(100);
+            var response: auth.AuthResponse = blk: {
+                while (attempts < 300) : (attempts += 1) {
+                    try self.transport.poll(100);
 
-                const len = self.transport.receiveFromStream(0, request_buffer[total_received..]) catch |err| {
-                    if (err == error.NoData) continue;
-                    std.log.err("Failed to receive authentication request: {}", .{err});
-                    return err;
-                };
+                    const len = self.transport.receiveFromStream(0, request_buffer[total_received..]) catch |err| {
+                        if (err == error.NoData) continue;
+                        std.log.err("Failed to receive authentication request: {}", .{err});
+                        return err;
+                    };
 
-                if (len == 0) continue;
-                total_received += len;
+                    if (len == 0) continue;
+                    total_received += len;
 
-                const request_data = request_buffer[0..total_received];
-                const exchange_hash = self.kex.getExchangeHash();
+                    const request_data = request_buffer[0..total_received];
+                    const exchange_hash = self.kex.getExchangeHash();
 
-                const auth_response = auth_server.processRequest(request_data, exchange_hash) catch |err| {
-                    if (err == error.EndOfBuffer) {
-                        continue;
-                    }
-                    std.log.err("Failed to process authentication request: {}", .{err});
-                    return err;
-                };
+                    const auth_response = auth_server.processRequest(request_data, exchange_hash) catch |err| {
+                        if (err == error.EndOfBuffer) {
+                            continue;
+                        }
+                        std.log.err("Failed to process authentication request: {}", .{err});
+                        return err;
+                    };
 
-                break :blk auth_response;
+                    break :blk auth_response;
+                }
+
+                return error.AuthenticationTimeout;
+            };
+            defer response.deinit(self.allocator);
+
+            try self.transport.sendOnStream(0, response.data);
+
+            if (response.success) {
+                std.log.info("✓ Authentication successful", .{});
+                return true;
             }
 
-            return error.AuthenticationTimeout;
-        };
-        defer response.deinit(self.allocator);
+            if (response.data.len >= 1 and response.data[0] == constants.SSH_MSG.USERAUTH_PK_OK) {
+                std.log.debug("Public key query accepted, waiting for signed auth request", .{});
+                continue;
+            }
 
-        // Send response to client
-        try self.transport.sendOnStream(0, response.data);
+            if (response.data.len >= 1 and response.data[0] == constants.SSH_MSG.USERAUTH_FAILURE) {
+                std.log.warn("Authentication attempt failed, waiting for another method", .{});
+                continue;
+            }
 
-        if (response.success) {
-            std.log.info("✓ Authentication successful", .{});
-        } else {
-            std.log.warn("✗ Authentication failed", .{});
+            return false;
         }
 
-        return response.success;
+        std.log.warn("✗ Authentication failed after maximum attempts", .{});
+        return false;
     }
 
     /// Send authentication banner to client

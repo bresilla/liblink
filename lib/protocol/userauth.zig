@@ -304,6 +304,47 @@ pub const UserauthBanner = struct {
     }
 };
 
+/// SSH_MSG_USERAUTH_PK_OK - public key is acceptable, send signed request next
+pub const UserauthPkOk = struct {
+    algorithm_name: []const u8,
+    public_key_blob: []const u8,
+
+    pub fn encode(self: *const UserauthPkOk, allocator: Allocator) ![]u8 {
+        const size = 1 + 4 + self.algorithm_name.len + 4 + self.public_key_blob.len;
+        const buffer = try allocator.alloc(u8, size);
+        errdefer allocator.free(buffer);
+
+        var writer = wire.Writer{ .buffer = buffer };
+        try writer.writeByte(constants.SSH_MSG.USERAUTH_PK_OK);
+        try writer.writeString(self.algorithm_name);
+        try writer.writeString(self.public_key_blob);
+        return buffer;
+    }
+
+    pub fn decode(allocator: Allocator, data: []const u8) !UserauthPkOk {
+        var reader = wire.Reader{ .buffer = data };
+
+        const msg_type = try reader.readByte();
+        if (msg_type != constants.SSH_MSG.USERAUTH_PK_OK) {
+            return error.InvalidMessageType;
+        }
+
+        const algorithm_name = try reader.readString(allocator);
+        errdefer allocator.free(algorithm_name);
+        const public_key_blob = try reader.readString(allocator);
+
+        return .{
+            .algorithm_name = algorithm_name,
+            .public_key_blob = public_key_blob,
+        };
+    }
+
+    pub fn deinit(self: *UserauthPkOk, allocator: Allocator) void {
+        allocator.free(self.algorithm_name);
+        allocator.free(self.public_key_blob);
+    }
+};
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -371,4 +412,23 @@ test "UserauthSuccess - encode/decode" {
 
     const decoded = try UserauthSuccess.decode(encoded);
     _ = decoded;
+}
+
+test "UserauthPkOk - encode/decode" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var pk_ok = UserauthPkOk{
+        .algorithm_name = "ssh-ed25519",
+        .public_key_blob = "dummy-key-blob",
+    };
+
+    const encoded = try pk_ok.encode(allocator);
+    defer allocator.free(encoded);
+
+    var decoded = try UserauthPkOk.decode(allocator, encoded);
+    defer decoded.deinit(allocator);
+
+    try testing.expectEqualStrings("ssh-ed25519", decoded.algorithm_name);
+    try testing.expectEqualStrings("dummy-key-blob", decoded.public_key_blob);
 }
