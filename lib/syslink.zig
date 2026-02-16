@@ -55,6 +55,8 @@ pub const platform = struct {
 };
 
 pub const ChannelData = @import("protocol/channel.zig").ChannelData;
+pub const ChannelExtendedData = @import("protocol/channel.zig").ChannelExtendedData;
+pub const ChannelRequest = @import("protocol/channel.zig").ChannelRequest;
 
 test {
     std.testing.refAllDecls(@This());

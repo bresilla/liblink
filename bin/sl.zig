@@ -402,7 +402,7 @@ fn runExecRequest(server_conn: *syslink.connection.ServerConnection, stream_id: 
         try server_conn.channel_manager.sendData(stream_id, result.stdout);
     }
     if (result.stderr.len > 0) {
-        try server_conn.channel_manager.sendData(stream_id, result.stderr);
+        try server_conn.channel_manager.sendExtendedData(stream_id, 1, result.stderr);
     }
 
     var exit_code: u32 = 1;
@@ -1231,13 +1231,59 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     };
     defer session.close() catch {};
 
-    const output = session.receiveData() catch |err| {
-        std.debug.print("✗ Failed to read output: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(output);
+    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
+    const stderr = std.fs.File{ .handle = std.posix.STDERR_FILENO };
 
-    std.debug.print("{s}", .{output});
+    var buffer: [65536]u8 = undefined;
+    var exit_status: ?u32 = null;
+
+    while (true) {
+        conn.transport.poll(5000) catch {};
+
+        const len = conn.transport.receiveFromStream(session.stream_id, &buffer) catch |err| {
+            if (err == error.NoData) continue;
+            if (err == error.EndOfStream) break;
+            std.debug.print("✗ Failed to read exec output: {}\n", .{err});
+            return;
+        };
+        if (len == 0) continue;
+
+        const packet = buffer[0..len];
+        if (packet.len == 0) continue;
+
+        switch (packet[0]) {
+            94 => { // SSH_MSG_CHANNEL_DATA
+                var msg = syslink.ChannelData.decode(allocator, packet) catch continue;
+                defer msg.deinit(allocator);
+                try stdout.writeAll(msg.data);
+            },
+            95 => { // SSH_MSG_CHANNEL_EXTENDED_DATA
+                var msg = syslink.ChannelExtendedData.decode(allocator, packet) catch continue;
+                defer msg.deinit(allocator);
+                if (msg.data_type_code == 1) {
+                    try stderr.writeAll(msg.data);
+                } else {
+                    try stdout.writeAll(msg.data);
+                }
+            },
+            98 => { // SSH_MSG_CHANNEL_REQUEST (exit-status)
+                var req = syslink.ChannelRequest.decode(allocator, packet) catch continue;
+                defer req.deinit(allocator);
+
+                if (std.mem.eql(u8, req.request_type, "exit-status") and req.type_specific_data.len >= 4) {
+                    exit_status = std.mem.readInt(u32, req.type_specific_data[0..4], .big);
+                }
+            },
+            96, 97 => break, // EOF or CLOSE
+            else => {},
+        }
+    }
+
+    if (exit_status) |code| {
+        if (code != 0) {
+            std.process.exit(@intCast(code));
+        }
+    }
 }
 
 fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {

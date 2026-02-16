@@ -243,6 +243,19 @@ pub const ChannelManager = struct {
         try self.transport.sendOnStream(stream_id, encoded);
     }
 
+    /// Send extended data (such as stderr) on channel
+    pub fn sendExtendedData(self: *Self, stream_id: u64, data_type_code: u32, data: []const u8) !void {
+        const ext_msg = channel_protocol.ChannelExtendedData{
+            .data_type_code = data_type_code,
+            .data = data,
+        };
+
+        const encoded = try ext_msg.encode(self.allocator);
+        defer self.allocator.free(encoded);
+
+        try self.transport.sendOnStream(stream_id, encoded);
+    }
+
     /// Receive data from channel
     ///
     /// Reads and decodes CHANNEL_DATA message from stream.
