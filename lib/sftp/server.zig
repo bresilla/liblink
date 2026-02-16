@@ -5,6 +5,7 @@ const attributes = @import("attributes.zig");
 const wire = @import("../protocol/wire.zig");
 const c = @cImport({
     @cInclude("sys/stat.h");
+    @cInclude("sys/statvfs.h");
     @cInclude("unistd.h");
     @cInclude("utime.h");
 });
@@ -227,8 +228,76 @@ pub const SftpServer = struct {
             return;
         }
 
+        if (std.mem.eql(u8, extension, "statvfs@openssh.com")) {
+            const path = try reader.readString(self.allocator);
+            defer self.allocator.free(path);
+
+            const resolved_path = self.resolveClientPath(path) catch |err| {
+                const status_code = statusFromError(err);
+                const msg = @errorName(err);
+                try self.sendStatus(request_id, status_code, msg, "");
+                return;
+            };
+            defer self.allocator.free(resolved_path);
+
+            var vfs: c.struct_statvfs = undefined;
+            const path_z = try self.allocator.dupeZ(u8, resolved_path);
+            defer self.allocator.free(path_z);
+            if (c.statvfs(path_z.ptr, &vfs) != 0) {
+                try self.sendStatus(request_id, .SSH_FX_FAILURE, "statvfs failed", "");
+                return;
+            }
+
+            try self.sendStatvfsReply(request_id, vfs);
+            return;
+        }
+
+        if (std.mem.eql(u8, extension, "fsync@openssh.com")) {
+            const handle = try reader.readString(self.allocator);
+            defer self.allocator.free(handle);
+            const handle_id = self.handleStringToId(handle) catch {
+                try self.sendStatus(request_id, .SSH_FX_FAILURE, "Invalid handle", "");
+                return;
+            };
+            if (!self.open_handles.contains(handle_id)) {
+                try self.sendStatus(request_id, .SSH_FX_FAILURE, "Invalid handle", "");
+                return;
+            }
+
+            try self.sendStatus(request_id, .SSH_FX_OK, "Success", "");
+            return;
+        }
+
         std.log.warn("Unsupported SFTP extension: {s}", .{extension});
         try self.sendStatus(request_id, .SSH_FX_OP_UNSUPPORTED, "Unsupported extension", "");
+    }
+
+    fn sendStatvfsReply(self: *SftpServer, request_id: u32, vfs: c.struct_statvfs) !void {
+        const payload_len: u32 = 8 * 11;
+        const packet_len: u32 = 1 + 4 + payload_len;
+        const total_len: usize = 4 + packet_len;
+
+        const packet = try self.allocator.alloc(u8, total_len);
+        defer self.allocator.free(packet);
+
+        var writer = wire.Writer{ .buffer = packet };
+        try writer.writeUint32(packet_len);
+        try writer.writeByte(@intFromEnum(protocol.PacketType.SSH_FXP_EXTENDED_REPLY));
+        try writer.writeUint32(request_id);
+
+        try writer.writeUint64(@intCast(vfs.f_bsize));
+        try writer.writeUint64(@intCast(vfs.f_frsize));
+        try writer.writeUint64(@intCast(vfs.f_blocks));
+        try writer.writeUint64(@intCast(vfs.f_bfree));
+        try writer.writeUint64(@intCast(vfs.f_bavail));
+        try writer.writeUint64(@intCast(vfs.f_files));
+        try writer.writeUint64(@intCast(vfs.f_ffree));
+        try writer.writeUint64(@intCast(vfs.f_favail));
+        try writer.writeUint64(@intCast(vfs.f_fsid));
+        try writer.writeUint64(@intCast(vfs.f_flag));
+        try writer.writeUint64(@intCast(vfs.f_namemax));
+
+        try self.channel.send(packet);
     }
 
     fn handleInit(self: *SftpServer, request_data: []const u8) !void {
