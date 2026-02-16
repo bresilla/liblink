@@ -256,12 +256,28 @@ pub const SftpServer = struct {
             const handle = try reader.readString(self.allocator);
             defer self.allocator.free(handle);
             const handle_id = self.handleStringToId(handle) catch {
-                try self.sendStatus(request_id, .SSH_FX_FAILURE, "Invalid handle", "");
+                try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, "Invalid handle", "");
                 return;
             };
-            if (!self.open_handles.contains(handle_id)) {
-                try self.sendStatus(request_id, .SSH_FX_FAILURE, "Invalid handle", "");
+
+            const open_handle = self.open_handles.getPtr(handle_id) orelse {
+                try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, "Invalid handle", "");
                 return;
+            };
+
+            switch (open_handle.*) {
+                .file => |*f| {
+                    f.file.sync() catch |err| {
+                        const status_code = statusFromError(err);
+                        const msg = @errorName(err);
+                        try self.sendStatus(request_id, status_code, msg, "");
+                        return;
+                    };
+                },
+                .directory => {
+                    try self.sendStatus(request_id, .SSH_FX_OP_UNSUPPORTED, "Handle is not a file", "");
+                    return;
+                },
             }
 
             try self.sendStatus(request_id, .SSH_FX_OK, "Success", "");
@@ -1409,10 +1425,27 @@ const DirEntry = struct {
 
 fn statusFromError(err: anyerror) protocol.StatusCode {
     return switch (err) {
-        error.FileNotFound => .SSH_FX_NO_SUCH_FILE,
-        error.PathAlreadyExists => .SSH_FX_FAILURE,
-        error.AccessDenied => .SSH_FX_PERMISSION_DENIED,
+        error.FileNotFound,
+        error.NotDir,
+        error.IsDir,
+        error.SymLinkLoop,
+        error.BadPathName,
+        => .SSH_FX_NO_SUCH_FILE,
+        error.AccessDenied,
+        error.PermissionDenied,
+        error.ReadOnlyFileSystem,
+        => .SSH_FX_PERMISSION_DENIED,
         error.OperationUnsupported => .SSH_FX_OP_UNSUPPORTED,
+        error.InvalidUtf8,
+        error.InvalidHandle,
+        error.UnexpectedPacketType,
+        error.EndOfBuffer,
+        => .SSH_FX_BAD_MESSAGE,
+        error.PathAlreadyExists,
+        error.NameTooLong,
+        error.NoSpaceLeft,
+        error.FileBusy,
+        => .SSH_FX_FAILURE,
         error.EndOfStream => .SSH_FX_EOF,
         else => .SSH_FX_FAILURE,
     };
@@ -1426,7 +1459,10 @@ test "SftpServer - statusFromError mapping" {
     const testing = std.testing;
 
     try testing.expectEqual(protocol.StatusCode.SSH_FX_NO_SUCH_FILE, statusFromError(error.FileNotFound));
+    try testing.expectEqual(protocol.StatusCode.SSH_FX_NO_SUCH_FILE, statusFromError(error.NotDir));
     try testing.expectEqual(protocol.StatusCode.SSH_FX_PERMISSION_DENIED, statusFromError(error.AccessDenied));
+    try testing.expectEqual(protocol.StatusCode.SSH_FX_PERMISSION_DENIED, statusFromError(error.ReadOnlyFileSystem));
+    try testing.expectEqual(protocol.StatusCode.SSH_FX_BAD_MESSAGE, statusFromError(error.EndOfBuffer));
     try testing.expectEqual(protocol.StatusCode.SSH_FX_EOF, statusFromError(error.EndOfStream));
     try testing.expectEqual(protocol.StatusCode.SSH_FX_FAILURE, statusFromError(error.OutOfMemory));
 }
