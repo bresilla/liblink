@@ -147,7 +147,6 @@ fn handleClient(
     std.debug.print("✓ Session channel opened (stream {})\n", .{stream_id});
 
     // Wait for channel request
-    var buffer: [4096]u8 = undefined;
     const len = connection.receiveSessionData(stream_id) catch |err| {
         std.debug.print("✗ Failed to receive request: {}\n", .{err});
         return err;
@@ -158,6 +157,7 @@ fn handleClient(
     session_server.handleRequest(
         stream_id,
         len,
+        null, // pty_handler
         handleShellRequest,
         handleExecRequest,
         handleSubsystemRequest,

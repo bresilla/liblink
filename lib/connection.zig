@@ -1,9 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const runquic_transport = @import("runquic_transport");
 
 // Import modules
 const kex_exchange = @import("kex/exchange.zig");
-const quic = @import("quic/transport.zig");
 const udp = @import("network/udp.zig");
 const constants = @import("common/constants.zig");
 const auth = @import("auth/auth.zig");
@@ -58,7 +58,7 @@ pub const ServerConfig = struct {
 /// Active SSH/QUIC client connection
 pub const ClientConnection = struct {
     allocator: Allocator,
-    transport: *quic.QuicTransport,
+    transport: *runquic_transport.QuicTransport,
     kex: kex_exchange.ClientKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -119,10 +119,10 @@ pub const ClientConnection = struct {
         const server_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&udp_transport.socket.address.any);
         @memcpy(std.mem.asBytes(&server_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(server_sockaddr_ptr));
 
-        const transport = try allocator.create(quic.QuicTransport);
+        const transport = try allocator.create(runquic_transport.QuicTransport);
         errdefer allocator.destroy(transport);
 
-        transport.* = try quic.QuicTransport.init(
+        transport.* = try runquic_transport.QuicTransport.init(
             allocator,
             udp_transport.socket.socket, // Reuse UDP socket
             local_conn_id,
@@ -381,7 +381,7 @@ pub const ClientConnection = struct {
 /// Active SSH/QUIC server connection handler
 pub const ServerConnection = struct {
     allocator: Allocator,
-    transport: quic.QuicTransport,
+    transport: runquic_transport.QuicTransport,
     kex: kex_exchange.ServerKeyExchange,
     channel_manager: channels.ChannelManager,
 
@@ -576,7 +576,7 @@ pub const ConnectionListener = struct {
             conn.deinit();
             self.allocator.destroy(conn);
         }
-        self.active_connections.deinit();
+        self.active_connections.deinit(self.allocator);
 
         self.udp_transport.deinit();
     }
@@ -657,7 +657,7 @@ pub const ConnectionListener = struct {
         const client_sockaddr_ptr: *const std.posix.sockaddr = @ptrCast(&init_result.client_address.any);
         @memcpy(std.mem.asBytes(&client_storage)[0..@sizeOf(std.posix.sockaddr)], std.mem.asBytes(client_sockaddr_ptr));
 
-        var transport = try quic.QuicTransport.init(
+        var transport = try runquic_transport.QuicTransport.init(
             self.allocator,
             self.udp_transport.socket.socket, // Reuse UDP socket
             local_conn_id,

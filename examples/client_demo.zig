@@ -120,7 +120,7 @@ fn demoShell(allocator: std.mem.Allocator, connection: *syslink.connection.Clien
 
     std.debug.print("  Opening shell channel...\n", .{});
 
-    var session = connection.requestShell() catch |err| {
+    var session = connection.requestShell(80, 24) catch |err| {
         std.debug.print("  ✗ Shell request failed: {}\n", .{err});
         return err;
     };

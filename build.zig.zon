@@ -1,8 +1,11 @@
 .{
     .name = .syslink,
-    .version = "0.0.1",
+    .version = "0.0.4",
     .dependencies = .{
-        // zquic removed - building custom minimal QUIC for SSH/QUIC
+        .runquic = .{
+            .url = "https://github.com/bresilla/runquic/archive/c7249e9aecd350b3c56b63117fd6862a228ab033.tar.gz",
+            .hash = "runquic-0.0.3-ouOgH3lDBgAPZWNZSGswfqNzHgluyMrq8rkNXXvSPC3j",
+        },
     },
     .paths = .{
         "build.zig",

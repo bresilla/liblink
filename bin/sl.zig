@@ -11,7 +11,7 @@ const c = @cImport({
     @cInclude("poll.h");
 });
 
-const VERSION = "0.1.0";
+const VERSION = "0.0.4";
 
 // Global flag for signal handling
 var should_exit = std.atomic.Value(bool).init(false);

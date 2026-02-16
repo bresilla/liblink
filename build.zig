@@ -19,7 +19,17 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // No external dependencies - building custom QUIC
+    const runquic_dep = b.dependency("runquic", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const runquic_module = runquic_dep.module("runquic");
+    const runquic_transport_module = b.createModule(.{
+        .root_source_file = runquic_dep.path("lib/transport.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
     const syslink_module = b.createModule(.{
         .root_source_file = b.path("lib/syslink.zig"),
@@ -28,13 +38,17 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     syslink_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    syslink_module.addImport("runquic", runquic_module);
+    syslink_module.addImport("runquic_transport", runquic_transport_module);
 
-    _ = b.addModule("syslink", .{
+    const syslink_export = b.addModule("syslink", .{
         .root_source_file = b.path("lib/syslink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+    syslink_export.addImport("runquic", runquic_module);
+    syslink_export.addImport("runquic_transport", runquic_transport_module);
 
     const lib = b.addLibrary(.{
         .name = "syslink",
@@ -56,30 +70,30 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
 
-    const ex_shell_module = b.createModule(.{
-        .root_source_file = b.path("examples/embedder_launch_shell.zig"),
+    const ex_client_module = b.createModule(.{
+        .root_source_file = b.path("examples/client_demo.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_shell_module.addImport("syslink", syslink_module);
+    ex_client_module.addImport("syslink", syslink_module);
 
-    const ex_shell = b.addExecutable(.{
-        .name = "example_embedder_launch_shell",
-        .root_module = ex_shell_module,
+    const ex_client = b.addExecutable(.{
+        .name = "client_demo",
+        .root_module = ex_client_module,
     });
 
-    const ex_events_module = b.createModule(.{
-        .root_source_file = b.path("examples/embedder_events.zig"),
+    const ex_server_module = b.createModule(.{
+        .root_source_file = b.path("examples/server_demo.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_events_module.addImport("syslink", syslink_module);
+    ex_server_module.addImport("syslink", syslink_module);
 
-    const ex_events = b.addExecutable(.{
-        .name = "example_embedder_events",
-        .root_module = ex_events_module,
+    const ex_server = b.addExecutable(.{
+        .name = "server_demo",
+        .root_module = ex_server_module,
     });
 
     const sl_module = b.createModule(.{
@@ -105,7 +119,7 @@ pub fn build(b: *std.Build) !void {
     const sl_step = b.step("sl", "Compile sl CLI binary");
     sl_step.dependOn(&sl.step);
 
-    const examples_step = b.step("examples", "Compile embedder examples");
-    examples_step.dependOn(&ex_shell.step);
-    examples_step.dependOn(&ex_events.step);
+    const examples_step = b.step("examples", "Compile example programs");
+    examples_step.dependOn(&ex_client.step);
+    examples_step.dependOn(&ex_server.step);
 }

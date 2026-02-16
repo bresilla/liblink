@@ -1,16 +1,15 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const runquic_transport = @import("runquic_transport");
 const channel_protocol = @import("../protocol/channel.zig");
-const quic = @import("../quic/transport.zig");
 
 /// Channel Manager
 ///
 /// Manages SSH channels mapped to QUIC streams.
 /// Handles channel lifecycle, type dispatch, and request routing.
-
 pub const ChannelManager = struct {
     allocator: Allocator,
-    transport: *quic.QuicTransport,
+    transport: *runquic_transport.QuicTransport,
     channels: std.AutoHashMap(u64, *ChannelInfo),
     next_client_stream_id: u64, // For client-initiated streams (4, 8, 12, ...)
 
@@ -28,7 +27,7 @@ pub const ChannelManager = struct {
         }
     };
 
-    pub fn init(allocator: Allocator, transport: *quic.QuicTransport, is_server: bool) Self {
+    pub fn init(allocator: Allocator, transport: *runquic_transport.QuicTransport, is_server: bool) Self {
         return Self{
             .allocator = allocator,
             .transport = transport,
