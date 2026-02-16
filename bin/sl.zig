@@ -9,9 +9,6 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
     @cInclude("termios.h");
     @cInclude("poll.h");
-    @cInclude("security/pam_appl.h");
-    @cInclude("shadow.h");
-    @cInclude("crypt.h");
 });
 
 const VERSION = "0.1.0";
@@ -625,20 +622,8 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         std.debug.print("✓ Client connected\n", .{});
 
-        // Handle authentication - validate against system users
+        // Handle authentication - public key only
         const Validators = struct {
-            fn passValidator(user: []const u8, pass: []const u8) bool {
-                std.debug.print("  → Validating password for user '{s}'\n", .{user});
-
-                if (syslink.auth.system.validatePassword(user, pass)) {
-                    std.debug.print("  ✓ Password authenticated\n", .{});
-                    return true;
-                }
-
-                std.debug.print("  ✗ Password authentication failed\n", .{});
-                return false;
-            }
-
             fn keyValidator(user: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
                 std.debug.print("  → Checking public key for user '{s}' (algorithm: {s})\n", .{ user, algorithm });
 
@@ -653,7 +638,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
 
         const authed = server_conn.handleAuthentication(
-            Validators.passValidator,
+            null,
             Validators.keyValidator,
         ) catch |err| {
             std.debug.print("✗ Authentication error: {}\n\n", .{err});

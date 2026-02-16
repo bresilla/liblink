@@ -49,6 +49,7 @@ pub const auth = struct {
     pub const dispatcher = @import("auth/auth.zig");
     pub const keyfile = @import("auth/keyfile.zig");
     pub const client = @import("auth/client.zig");
+    pub const system = @import("auth/system.zig");
 };
 
 pub const channels = @import("channels/channels.zig");
