@@ -620,6 +620,14 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("  Auth: System users (like SSH)\n\n", .{});
 
     if (daemon_mode and !foreground_internal) {
+        if (readPidFile(allocator)) |existing_pid| {
+            if (processAlive(existing_pid)) {
+                std.debug.print("Server already running with pid {}\n", .{existing_pid});
+                return error.ServerAlreadyRunning;
+            }
+            removePidFile();
+        } else |_| {}
+
         const exe_path = try std.fs.selfExePathAlloc(allocator);
         defer allocator.free(exe_path);
 
@@ -712,9 +720,21 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     std.debug.print("Ready for connections. Press Ctrl+C to stop.\n\n", .{});
 
+    // Install signal handler for graceful shutdown
+    should_exit.store(false, .release);
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigInt },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+
     // Server loop
     var client_count: usize = 0;
     while (true) {
+        if (should_exit.load(.acquire)) break;
+
         var server_conn = listener.acceptConnection() catch |err| {
             if (err == error.WouldBlock) {
                 // No connection ready, wait before trying again
@@ -774,6 +794,11 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         std.debug.print("Session ended\n\n", .{});
     }
+
+    if (foreground_internal) {
+        removePidFile();
+    }
+    std.debug.print("Server stopped\n", .{});
 }
 
 fn writePidFile(pid: std.process.Child.Id) !void {
