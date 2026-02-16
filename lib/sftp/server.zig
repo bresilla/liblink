@@ -198,6 +198,7 @@ pub const SftpServer = struct {
             .SSH_FXP_FSETSTAT => try self.handleFsetstat(request_data),
             .SSH_FXP_READLINK => try self.handleReadlink(request_data),
             .SSH_FXP_SYMLINK => try self.handleSymlink(request_data),
+            .SSH_FXP_EXTENDED => try self.handleExtended(request_data),
             else => {
                 std.log.warn("Unsupported SFTP operation: {}", .{packet_type});
                 if (request_data.len < 9) return;
@@ -206,6 +207,28 @@ pub const SftpServer = struct {
                 try self.sendStatus(request_id, .SSH_FX_OP_UNSUPPORTED, "Operation not supported", "");
             },
         }
+    }
+
+    fn handleExtended(self: *SftpServer, request_data: []const u8) !void {
+        var reader = wire.Reader{ .buffer = request_data };
+        _ = try reader.readUint32(); // length
+        _ = try reader.readByte(); // packet type
+        const request_id = try reader.readUint32();
+        const extension = try reader.readString(self.allocator);
+        defer self.allocator.free(extension);
+
+        if (std.mem.eql(u8, extension, "posix-rename@openssh.com")) {
+            const oldpath = try reader.readString(self.allocator);
+            defer self.allocator.free(oldpath);
+            const newpath = try reader.readString(self.allocator);
+            defer self.allocator.free(newpath);
+
+            try self.performRename(request_id, oldpath, newpath, "SFTP EXTENDED posix-rename");
+            return;
+        }
+
+        std.log.warn("Unsupported SFTP extension: {s}", .{extension});
+        try self.sendStatus(request_id, .SSH_FX_OP_UNSUPPORTED, "Unsupported extension", "");
     }
 
     fn handleInit(self: *SftpServer, request_data: []const u8) !void {
@@ -663,7 +686,17 @@ pub const SftpServer = struct {
         const newpath = try reader.readString(self.allocator);
         defer self.allocator.free(newpath);
 
-        std.log.info("SFTP RENAME: {s} -> {s}", .{ oldpath, newpath });
+        try self.performRename(request_id, oldpath, newpath, "SFTP RENAME");
+    }
+
+    fn performRename(
+        self: *SftpServer,
+        request_id: u32,
+        oldpath: []const u8,
+        newpath: []const u8,
+        log_prefix: []const u8,
+    ) !void {
+        std.log.info("{s}: {s} -> {s}", .{ log_prefix, oldpath, newpath });
 
         const resolved_old = self.resolveClientPath(oldpath) catch |err| {
             const status_code = statusFromError(err);
