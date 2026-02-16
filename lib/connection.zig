@@ -386,22 +386,6 @@ pub const ServerConnection = struct {
 
     const Self = @This();
 
-    /// Accept and handle an incoming SSH/QUIC connection
-    ///
-    /// DEPRECATED: Use ConnectionListener.acceptConnection() instead.
-    /// This function cannot work with the new QUIC implementation as it requires
-    /// a UDP socket from the key exchange phase.
-    pub fn accept(
-        allocator: Allocator,
-        config: ServerConfig,
-        init_data: []const u8,
-    ) !Self {
-        _ = allocator;
-        _ = config;
-        _ = init_data;
-        return error.DeprecatedUseConnectionListener;
-    }
-
     pub fn deinit(self: *Self) void {
         self.channel_manager.deinit();
         self.transport.deinit();
@@ -746,39 +730,6 @@ pub fn startServer(
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "ServerConnection - accept with init data" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var prng = std.Random.DefaultPrng.init(12345);
-    const random = prng.random();
-
-    // Create mock SSH_QUIC_INIT
-    var client_kex = kex_exchange.ClientKeyExchange.init(allocator, random);
-    defer client_kex.deinit();
-
-    const quic_versions = [_]u32{1};
-    const init_data = try client_kex.createInit("localhost", &quic_versions, "client_params");
-    defer allocator.free(init_data);
-
-    // Server accepts connection
-    var host_private_key: [64]u8 = undefined;
-    random.bytes(&host_private_key);
-
-    const config = ServerConfig{
-        .listen_address = "127.0.0.1",
-        .listen_port = 2222,
-        .quic_versions = &quic_versions,
-        .quic_params = "server_params",
-        .host_key = "ssh-ed25519 AAAA...",
-        .host_private_key = &host_private_key,
-        .random = random,
-    };
-
-    const result = ServerConnection.accept(allocator, config, init_data);
-    try testing.expectError(error.DeprecatedUseConnectionListener, result);
-}
 
 test "ConnectionConfig - default values" {
     const testing = std.testing;
