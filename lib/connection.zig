@@ -341,6 +341,11 @@ pub const ClientConnection = struct {
         }
     }
 
+    /// Returns the server host key fingerprint observed during KEX.
+    pub fn getServerHostKeyFingerprint(self: *const Self) []const u8 {
+        return self.kex.getServerHostKeyFingerprint();
+    }
+
     fn ensureAuthStreamOpen(self: *Self) !void {
         _ = self.transport.openStream() catch |err| blk: {
             // Stream might already exist, that's fine for stream 0 auth flow.

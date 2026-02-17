@@ -32,6 +32,7 @@ pub const ClientKeyExchange = struct {
     init_message: ?kex_init.SshQuicInit,
     init_message_encoded: ?[]u8, // Save original encoded bytes for exchange hash
     reply_message: ?kex_reply.SshQuicReply,
+    server_host_key_fingerprint: ?[]u8,
     shared_secret: ?[32]u8,
     exchange_hash: ?[]u8,
 
@@ -48,6 +49,7 @@ pub const ClientKeyExchange = struct {
             .init_message = null,
             .init_message_encoded = null,
             .reply_message = null,
+            .server_host_key_fingerprint = null,
             .shared_secret = null,
             .exchange_hash = null,
         };
@@ -62,6 +64,9 @@ pub const ClientKeyExchange = struct {
         }
         if (self.reply_message) |*msg| {
             msg.deinit(self.allocator);
+        }
+        if (self.server_host_key_fingerprint) |fp| {
+            self.allocator.free(fp);
         }
         if (self.exchange_hash) |hash| {
             self.allocator.free(hash);
@@ -173,6 +178,9 @@ pub const ClientKeyExchange = struct {
             server_data.host_key,
         );
 
+        const host_fingerprint = try computeHostKeyFingerprint(self.allocator, server_data.host_key);
+        errdefer self.allocator.free(host_fingerprint);
+
         // Verify server host key against trusted fingerprint set (if configured)
         try verifyTrustedHostKey(
             self.allocator,
@@ -191,6 +199,7 @@ pub const ClientKeyExchange = struct {
         self.shared_secret = shared_secret;
         self.exchange_hash = exchange_hash;
         self.reply_message = reply;
+        self.server_host_key_fingerprint = host_fingerprint;
 
         return .{
             .client_secret = quic_secrets.client_secret,
@@ -205,6 +214,10 @@ pub const ClientKeyExchange = struct {
     /// Must be called after processReply() has completed successfully.
     pub fn getExchangeHash(self: *const Self) []const u8 {
         return self.exchange_hash orelse &[_]u8{};
+    }
+
+    pub fn getServerHostKeyFingerprint(self: *const Self) []const u8 {
+        return self.server_host_key_fingerprint orelse &[_]u8{};
     }
 };
 

@@ -670,6 +670,42 @@ fn authenticateClient(
     return try conn.authenticatePassword(username, password);
 }
 
+fn connectClientWithHostTrust(
+    allocator: std.mem.Allocator,
+    hostname: []const u8,
+    port: u16,
+    random: std.Random,
+) !syslink.connection.ClientConnection {
+    const host_key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ hostname, port });
+    defer allocator.free(host_key);
+
+    const trusted = try syslink.auth.known_hosts.loadFingerprintsForHost(allocator, host_key);
+    defer syslink.auth.known_hosts.freeFingerprints(allocator, trusted);
+
+    var trusted_const = try allocator.alloc([]const u8, trusted.len);
+    defer allocator.free(trusted_const);
+    for (trusted, 0..) |fp, idx| {
+        trusted_const[idx] = fp;
+    }
+
+    const config = syslink.connection.ConnectionConfig{
+        .server_address = hostname,
+        .server_port = port,
+        .trusted_host_fingerprints = trusted_const,
+        .random = random,
+    };
+
+    var conn = try syslink.connection.ClientConnection.connect(allocator, config);
+
+    const observed = conn.getServerHostKeyFingerprint();
+    if (observed.len > 0 and trusted.len == 0) {
+        try syslink.auth.known_hosts.addFingerprint(allocator, host_key, observed);
+        std.debug.print("✓ Added host fingerprint to known hosts: {s}\n", .{host_key});
+    }
+
+    return conn;
+}
+
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
@@ -737,7 +773,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.debug.print("\nTroubleshooting:\n", .{});
         std.debug.print("  • Check server is running: nc -u -v {s} {d}\n", .{ hostname, port });
@@ -945,7 +981,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -1089,7 +1125,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = syslink.connection.connectClient(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
