@@ -557,42 +557,16 @@ fn authenticateClient(
     password_arg: ?[]const u8,
     identity_path: ?[]const u8,
 ) !bool {
-    if (identity_path) |path| {
-        var parsed = try syslink.auth.keyfile.parsePrivateKeyFile(allocator, path);
-        defer parsed.deinit();
-
-        if (parsed.key_type != .ed25519) {
-            return error.UnsupportedKeyType;
-        }
-        if (parsed.public_key.len != 32 or parsed.private_key.len != 64) {
-            return error.InvalidKeyMaterial;
-        }
-
-        var public_key: [32]u8 = undefined;
-        @memcpy(&public_key, parsed.public_key[0..32]);
-        var private_key: [64]u8 = undefined;
-        @memcpy(&private_key, parsed.private_key[0..64]);
-
-        const public_key_blob = try encodeHostKeyBlob(allocator, &public_key);
-        defer allocator.free(public_key_blob);
-
-        const authed = try conn.authenticatePublicKey(
-            username,
-            parsed.algorithm_name,
-            public_key_blob,
-            &private_key,
-        );
-        if (authed) return true;
-    }
-
     const password_owned = if (password_arg == null)
         try getPassword(allocator, "Password: ")
     else
         null;
     defer if (password_owned) |pw| allocator.free(pw);
 
-    const password = password_arg orelse password_owned.?;
-    return try conn.authenticatePassword(username, password);
+    return try syslink.auth.workflow.authenticateClient(allocator, conn, username, .{
+        .identity_path = identity_path,
+        .password = if (password_arg) |pw| pw else password_owned,
+    });
 }
 
 fn connectClientWithHostTrust(

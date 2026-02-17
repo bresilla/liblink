@@ -41,6 +41,7 @@ pub const auth = struct {
     pub const dispatcher = @import("auth/auth.zig");
     pub const keyfile = @import("auth/keyfile.zig");
     pub const known_hosts = @import("auth/known_hosts.zig");
+    pub const workflow = @import("auth/workflow.zig");
     pub const client = @import("auth/client.zig");
     pub const system = @import("auth/system.zig");
 };
