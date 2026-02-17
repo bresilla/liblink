@@ -825,7 +825,7 @@ pub fn connectClientTrusted(
     random: std.Random,
     policy: HostKeyTrustPolicy,
 ) !ClientConnection {
-    const host_key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ server_address, server_port });
+    const host_key = try known_hosts.hostKeyForEndpoint(allocator, server_address, server_port);
     defer allocator.free(host_key);
 
     const trusted_owned = try known_hosts.loadFingerprintsForHost(allocator, host_key);
