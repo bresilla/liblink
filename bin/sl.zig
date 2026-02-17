@@ -1082,17 +1082,64 @@ fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
     return try allocator.dupe(u8, trimmed);
 }
 
+fn authenticateClient(
+    allocator: std.mem.Allocator,
+    conn: *syslink.connection.ClientConnection,
+    username: []const u8,
+    password_arg: ?[]const u8,
+    identity_path: ?[]const u8,
+) !bool {
+    if (identity_path) |path| {
+        var parsed = try syslink.auth.keyfile.parsePrivateKeyFile(allocator, path);
+        defer parsed.deinit();
+
+        if (parsed.key_type != .ed25519) {
+            return error.UnsupportedKeyType;
+        }
+        if (parsed.public_key.len != 32 or parsed.private_key.len != 64) {
+            return error.InvalidKeyMaterial;
+        }
+
+        var public_key: [32]u8 = undefined;
+        @memcpy(&public_key, parsed.public_key[0..32]);
+        var private_key: [64]u8 = undefined;
+        @memcpy(&private_key, parsed.private_key[0..64]);
+
+        const public_key_blob = try encodeHostKeyBlob(allocator, &public_key);
+        defer allocator.free(public_key_blob);
+
+        const authed = try conn.authenticatePublicKey(
+            username,
+            parsed.algorithm_name,
+            public_key_blob,
+            &private_key,
+        );
+        if (authed) return true;
+    }
+
+    const password_owned = if (password_arg == null)
+        try getPassword(allocator, "Password: ")
+    else
+        null;
+    defer if (password_owned) |pw| allocator.free(pw);
+
+    const password = password_arg orelse password_owned.?;
+    return try conn.authenticatePassword(username, password);
+}
+
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
         std.debug.print("Usage: sl shell [options] [user@]host[:port]\n", .{});
         std.debug.print("Options:\n", .{});
         std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
+        std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.process.exit(1);
     }
 
     // Parse options
     var password_arg: ?[]const u8 = null;
+    var identity_path: ?[]const u8 = null;
     var host_arg: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -1105,6 +1152,13 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
             }
             i += 1;
             password_arg = args[i];
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -i requires a key file path\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            identity_path = args[i];
         } else if (arg[0] != '-') {
             host_arg = arg;
         }
@@ -1152,16 +1206,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     std.debug.print("✓ Connected\n", .{});
 
-    // Get password (from argument or prompt)
-    const password_owned = if (password_arg == null)
-        try getPassword(allocator, "Password: ")
-    else
-        null;
-    defer if (password_owned) |pw| allocator.free(pw);
-
-    const password = password_arg orelse password_owned.?;
-
-    const auth_success = conn.authenticatePassword(username, password) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -1286,13 +1331,54 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.
 fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         std.debug.print("Error: Host and command required\n", .{});
-        std.debug.print("Usage: sl exec [user@]host[:port] <command>\n", .{});
+        std.debug.print("Usage: sl exec [options] [user@]host[:port] <command>\n", .{});
+        std.debug.print("Options:\n", .{});
+        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
+        std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.debug.print("Example: sl exec user@host \"ls -la\"\n", .{});
         std.process.exit(1);
     }
 
-    const host_arg = args[0];
-    const command = args[1];
+    var password_arg: ?[]const u8 = null;
+    var identity_path: ?[]const u8 = null;
+    var positionals = std.ArrayListUnmanaged([]const u8){};
+    defer positionals.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -p requires a password argument\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            password_arg = args[i];
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -i requires a key file path\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            identity_path = args[i];
+        } else {
+            try positionals.append(allocator, arg);
+        }
+    }
+
+    if (positionals.items.len < 2) {
+        std.debug.print("Error: Host and command required\n", .{});
+        std.process.exit(1);
+    }
+
+    const host_arg = positionals.items[0];
+    var command_buf = std.ArrayListUnmanaged(u8){};
+    defer command_buf.deinit(allocator);
+    for (positionals.items[1..], 0..) |part, idx| {
+        if (idx > 0) try command_buf.append(allocator, ' ');
+        try command_buf.appendSlice(allocator, part);
+    }
+    const command = command_buf.items;
 
     var username: []const u8 = "root";
     var hostname: []const u8 = undefined;
@@ -1322,10 +1408,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     };
     defer conn.deinit();
 
-    const password = try getPassword(allocator, "Password: ");
-    defer allocator.free(password);
-
-    const auth_success = conn.authenticatePassword(username, password) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -1399,21 +1482,55 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 1) {
         std.debug.print("Error: Host required\n", .{});
-        std.debug.print("Usage: sl sftp [user@]host[:port]\n", .{});
+        std.debug.print("Usage: sl sftp [options] [user@]host[:port]\n", .{});
+        std.debug.print("Options:\n", .{});
+        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
+        std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.process.exit(1);
     }
 
-    const host_arg = args[0];
+    var password_arg: ?[]const u8 = null;
+    var identity_path: ?[]const u8 = null;
+    var host_arg: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -p requires a password argument\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            password_arg = args[i];
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: -i requires a key file path\n", .{});
+                std.process.exit(1);
+            }
+            i += 1;
+            identity_path = args[i];
+        } else if (arg[0] != '-') {
+            host_arg = arg;
+        }
+    }
+
+    if (host_arg == null) {
+        std.debug.print("Error: Host required\n", .{});
+        std.process.exit(1);
+    }
+
+    const host_arg_val = host_arg.?;
 
     var username: []const u8 = "root";
     var hostname: []const u8 = undefined;
     var port: u16 = 2222;
 
-    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
-        username = host_arg[0..at_pos];
-        hostname = host_arg[at_pos + 1 ..];
+    if (std.mem.indexOf(u8, host_arg_val, "@")) |at_pos| {
+        username = host_arg_val[0..at_pos];
+        hostname = host_arg_val[at_pos + 1 ..];
     } else {
-        hostname = host_arg;
+        hostname = host_arg_val;
     }
 
     if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
@@ -1437,10 +1554,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("✓ Connected\n", .{});
 
-    const password = try getPassword(allocator, "Password: ");
-    defer allocator.free(password);
-
-    const auth_success = conn.authenticatePassword(username, password) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };
