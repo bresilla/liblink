@@ -12,7 +12,6 @@ pub const sftp_e2e = @import("sftp_e2e_test.zig");
 pub const network_auth_e2e = @import("network_auth_e2e_test.zig");
 pub const network_sftp_e2e = @import("network_sftp_e2e_test.zig");
 pub const server_lifecycle = @import("server_lifecycle_test.zig");
-pub const demo_validation = @import("demo_validation_test.zig");
 
 test {
     std.testing.refAllDecls(@This());

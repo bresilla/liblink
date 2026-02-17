@@ -2,69 +2,50 @@ const std = @import("std");
 const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 
-// Integration test: Server lifecycle management
-
-test "Integration: Server lifecycle components" {
-    std.log.info("=== Integration Test: Server Lifecycle ===", .{});
-
-    // Verify server lifecycle components exist
-    _ = syslink.connection.ConnectionListener;
-    _ = syslink.connection.ServerConnection;
-    _ = syslink.connection.ServerConfig;
-
-    std.log.info("✓ Server lifecycle components available", .{});
+fn chooseTestPort() u16 {
+    const ts: u64 = @intCast(std.time.nanoTimestamp());
+    const base: u16 = 42000;
+    return base + @as(u16, @intCast(ts % 1500));
 }
 
-test "Integration: Server configuration structure" {
-    std.log.info("=== Integration Test: Server Configuration ===", .{});
+fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
+    const alg = "ssh-ed25519";
+    const size = 4 + alg.len + 4 + 32;
+    const buffer = try allocator.alloc(u8, size);
+    errdefer allocator.free(buffer);
 
-    // Verify ServerConfig type exists and has expected fields
-    _ = syslink.connection.ServerConfig;
-
-    std.log.info("✓ Server configuration structure validated", .{});
+    var writer = syslink.protocol.wire.Writer{ .buffer = buffer };
+    try writer.writeString(alg);
+    try writer.writeString(public_key);
+    return buffer;
 }
 
-test "Integration: Session handler structure" {
-    std.log.info("=== Integration Test: Session Handlers ===", .{});
+test "Integration: listener shutdown rejects acceptConnection" {
+    const allocator = testing.allocator;
+    const port = chooseTestPort();
 
-    // Verify session request handlers exist
-    _ = syslink.channels.SessionServer;
+    const ed_keypair = std.crypto.sign.Ed25519.KeyPair.generate();
+    var host_private_key: [64]u8 = undefined;
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
 
-    std.log.info("✓ Session handler structure validated", .{});
-}
+    const host_key_blob = try encodeHostKeyBlob(allocator, &ed_keypair.public_key.bytes);
+    defer allocator.free(host_key_blob);
 
-test "Integration: SFTP subsystem integration point" {
-    std.log.info("=== Integration Test: SFTP Integration ===", .{});
+    var prng = std.Random.DefaultPrng.init(0x4455_6677);
+    const random = prng.random();
 
-    // Verify SFTP can be started from session subsystem request
-    _ = syslink.sftp.SftpServer;
-    _ = syslink.channels.SessionServer;
+    var listener = try syslink.connection.startServer(
+        allocator,
+        "127.0.0.1",
+        port,
+        host_key_blob,
+        &host_private_key,
+        random,
+    );
+    defer listener.deinit();
 
-    std.log.info("✓ SFTP subsystem integration point validated", .{});
-}
+    try testing.expectEqual(@as(usize, 0), listener.getActiveConnectionCount());
 
-test "Integration: End-to-end flow structure validation" {
-    std.log.info("=== Integration Test: End-to-End Flow ===", .{});
-
-    // Complete flow components:
-
-    // 1. Connection establishment
-    _ = syslink.network.udp.KeyExchangeTransport;
-    _ = syslink.kex.exchange.ClientKeyExchange;
-    _ = syslink.kex.exchange.ServerKeyExchange;
-
-    // 2. Authentication
-    _ = syslink.auth.client.AuthClient;
-    _ = syslink.auth.dispatcher.AuthServer;
-
-    // 3. Channel/Session
-    _ = syslink.channels.ChannelManager;
-    _ = syslink.channels.SessionServer;
-
-    // 4. SFTP (if requested)
-    _ = syslink.sftp.SftpClient;
-    _ = syslink.sftp.SftpServer;
-
-    std.log.info("✓ Complete end-to-end flow components available", .{});
-    std.log.info("✓ Integration ready for deployment", .{});
+    listener.shutdown();
+    try testing.expectError(error.ServerShutdown, listener.acceptConnection());
 }

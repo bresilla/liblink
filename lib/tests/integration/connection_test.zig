@@ -2,58 +2,83 @@ const std = @import("std");
 const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 
-// Integration test: Full client-server connection flow components
-
-test "Integration: Server components available" {
-    std.log.info("=== Integration Test: Server Components ===", .{});
-
-    // Verify server components exist
-    _ = syslink.connection.ServerConnection;
-    _ = syslink.connection.ConnectionListener;
-    _ = syslink.connection.ServerConfig;
-
-    std.log.info("✓ Server connection components available", .{});
+fn passwordValidator(username: []const u8, password: []const u8) bool {
+    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass");
 }
 
-test "Integration: Client components available" {
-    std.log.info("=== Integration Test: Client Components ===", .{});
-
-    // Verify client components exist
-    _ = syslink.connection.ClientConnection;
-    _ = syslink.connection.ConnectionConfig;
-
-    std.log.info("✓ Client connection components available", .{});
+fn publicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
+    _ = public_key_blob;
+    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, algorithm, "ssh-ed25519");
 }
 
-test "Integration: Authentication components available" {
-    std.log.info("=== Integration Test: Authentication ===", .{});
+fn encodePublicKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
+    const alg = "ssh-ed25519";
+    const size = 4 + alg.len + 4 + public_key.len;
+    const blob = try allocator.alloc(u8, size);
+    errdefer allocator.free(blob);
 
-    // Verify auth components exist
-    _ = syslink.auth.dispatcher.AuthServer;
-    _ = syslink.auth.client.AuthClient;
-
-    std.log.info("✓ Authentication components validated", .{});
+    var writer = syslink.protocol.wire.Writer{ .buffer = blob };
+    try writer.writeString(alg);
+    try writer.writeString(public_key);
+    return blob;
 }
 
-test "Integration: All required components available" {
-    // Verify all required components for integration are available
+test "Integration: password auth client/server roundtrip" {
+    const allocator = testing.allocator;
 
-    // Connection layer
-    _ = syslink.connection.ClientConnection;
-    _ = syslink.connection.ServerConnection;
-    _ = syslink.connection.ConnectionListener;
+    var client = syslink.auth.client.AuthClient.init(allocator, "testuser");
+    var server = syslink.auth.dispatcher.AuthServer.init(allocator);
+    server.setPasswordValidator(passwordValidator);
 
-    // Authentication layer
-    _ = syslink.auth.client.AuthClient;
-    _ = syslink.auth.dispatcher.AuthServer;
+    const request = try client.authenticatePassword("testpass");
+    defer allocator.free(request);
 
-    // Channel layer
-    _ = syslink.channels.ChannelManager;
-    _ = syslink.channels.SessionServer;
+    var response = try server.processRequest(request, "exchange_hash");
+    defer response.deinit(allocator);
 
-    // SFTP layer
-    _ = syslink.sftp.SftpClient;
-    _ = syslink.sftp.SftpServer;
+    try testing.expect(response.success);
 
-    std.log.info("✓ All integration components available", .{});
+    var result = try client.processResponse(response.data);
+    defer result.deinit(allocator);
+    try testing.expect(result == .success);
+}
+
+test "Integration: publickey auth two-step roundtrip" {
+    const allocator = testing.allocator;
+
+    const ed = std.crypto.sign.Ed25519.KeyPair.generate();
+    var private_key: [64]u8 = undefined;
+    @memcpy(&private_key, &ed.secret_key.bytes);
+
+    const pub_blob = try encodePublicKeyBlob(allocator, &ed.public_key.bytes);
+    defer allocator.free(pub_blob);
+
+    var client = syslink.auth.client.AuthClient.init(allocator, "testuser");
+    var server = syslink.auth.dispatcher.AuthServer.init(allocator);
+    server.setPublicKeyValidator(publicKeyValidator);
+
+    // Step 1: query (no signature) -> PK_OK
+    const query = try client.authenticatePublicKey("ssh-ed25519", pub_blob, null, "exchange_hash");
+    defer allocator.free(query);
+
+    var query_resp = try server.processRequest(query, "exchange_hash");
+    defer query_resp.deinit(allocator);
+    try testing.expect(!query_resp.success);
+    try testing.expectEqual(@as(u8, syslink.common.constants.SSH_MSG.USERAUTH_PK_OK), query_resp.data[0]);
+
+    var query_result = try client.processResponse(query_resp.data);
+    defer query_result.deinit(allocator);
+    try testing.expect(query_result == .pk_ok);
+
+    // Step 2: signed request -> SUCCESS
+    const signed = try client.authenticatePublicKey("ssh-ed25519", pub_blob, &private_key, "exchange_hash");
+    defer allocator.free(signed);
+
+    var signed_resp = try server.processRequest(signed, "exchange_hash");
+    defer signed_resp.deinit(allocator);
+    try testing.expect(signed_resp.success);
+
+    var signed_result = try client.processResponse(signed_resp.data);
+    defer signed_result.deinit(allocator);
+    try testing.expect(signed_result == .success);
 }
