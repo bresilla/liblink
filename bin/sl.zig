@@ -395,22 +395,15 @@ fn runExecRequest(server_conn: *syslink.connection.ServerConnection, stream_id: 
     std.debug.print("Running exec command on stream {}: {s}\n", .{ stream_id, command });
 
     const auth_user = current_authenticated_user orelse return error.NoAuthenticatedUser;
+    var account = try syslink.platform.user.lookup(server_conn.allocator, auth_user);
+    defer account.deinit();
 
-    var argv_list = std.ArrayListUnmanaged([]const u8){};
-    defer argv_list.deinit(server_conn.allocator);
-
-    try argv_list.append(server_conn.allocator, "su");
-    try argv_list.append(server_conn.allocator, "-s");
-    try argv_list.append(server_conn.allocator, "/bin/sh");
-    try argv_list.append(server_conn.allocator, auth_user);
-    try argv_list.append(server_conn.allocator, "-c");
-    try argv_list.append(server_conn.allocator, command);
-
-    const result = try std.process.Child.run(.{
-        .allocator = server_conn.allocator,
-        .argv = argv_list.items,
-        .max_output_bytes = 16 * 1024 * 1024,
-    });
+    const result = try syslink.platform.user.runCommandAsUser(
+        server_conn.allocator,
+        &account,
+        command,
+        16 * 1024 * 1024,
+    );
     defer server_conn.allocator.free(result.stdout);
     defer server_conn.allocator.free(result.stderr);
 
@@ -438,6 +431,9 @@ fn runSftpSubsystem(server_conn: *syslink.connection.ServerConnection, stream_id
     std.debug.print("Starting SFTP subsystem on stream {}...\n", .{stream_id});
 
     var root_buf: [4096]u8 = undefined;
+    var derived_root: ?[]u8 = null;
+    defer if (derived_root) |root| server_conn.allocator.free(root);
+
     const sftp_root = std.process.getEnvVarOwned(server_conn.allocator, "SL_SFTP_ROOT") catch |err| switch (err) {
         error.EnvironmentVariableNotFound => null,
         else => return err,
@@ -448,14 +444,14 @@ fn runSftpSubsystem(server_conn: *syslink.connection.ServerConnection, stream_id
         root
     else blk: {
         if (current_authenticated_user) |user| {
-            var user_buf: [256]u8 = undefined;
-            if (user.len > 0 and user.len < user_buf.len) {
-                @memcpy(user_buf[0..user.len], user);
-                user_buf[user.len] = 0;
-                if (c.getpwnam(@ptrCast(&user_buf[0]))) |pw| {
-                    if (pw.*.pw_dir != null) break :blk std.mem.span(pw.*.pw_dir);
+            if (syslink.platform.user.lookup(server_conn.allocator, user)) |account| {
+                defer {
+                    var mutable = account;
+                    mutable.deinit();
                 }
-            }
+                derived_root = try server_conn.allocator.dupe(u8, account.home_z);
+                break :blk derived_root.?;
+            } else |_| {}
         }
 
         const cwd = try std.posix.getcwd(&root_buf);
@@ -533,19 +529,8 @@ fn shellHandler(stream_id: u64) !void {
 
     // Get authenticated user info and prepare environment
     const auth_user = current_authenticated_user orelse return error.NoAuthenticatedUser;
-
-    var username_buf: [256]u8 = undefined;
-    if (auth_user.len == 0 or auth_user.len >= username_buf.len) {
-        return error.InvalidUsername;
-    }
-    @memcpy(username_buf[0..auth_user.len], auth_user);
-    username_buf[auth_user.len] = 0;
-
-    const user_info_ptr = c.getpwnam(@ptrCast(&username_buf[0]));
-    if (user_info_ptr == null) {
-        return error.UserNotFound;
-    }
-    const user_info = user_info_ptr.?.*;
+    var account = try syslink.platform.user.lookup(allocator, auth_user);
+    defer account.deinit();
 
     // Allocate null-terminated TERM string if from PTY request
     var term_buf: [256]u8 = undefined;
@@ -560,10 +545,12 @@ fn shellHandler(stream_id: u64) !void {
 
     const shell_env = syslink.platform.pty.ShellEnv{
         .term = term_ptr,
-        .home = user_info.pw_dir,
-        .shell = user_info.pw_shell,
-        .user = user_info.pw_name,
-        .logname = user_info.pw_name,
+        .home = account.home_z.ptr,
+        .shell = account.shell_z.ptr,
+        .user = account.username_z.ptr,
+        .logname = account.username_z.ptr,
+        .uid = account.uid,
+        .gid = account.gid,
     };
 
     // Spawn shell with environment

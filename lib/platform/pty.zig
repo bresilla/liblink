@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const user = @import("user.zig");
 
 // External C functions for PTY
 extern "c" fn grantpt(fd: c_int) c_int;
@@ -89,6 +90,8 @@ pub const ShellEnv = struct {
     shell: [*:0]const u8,
     user: [*:0]const u8,
     logname: [*:0]const u8,
+    uid: ?std.posix.uid_t = null,
+    gid: ?std.posix.gid_t = null,
 };
 
 /// Spawn a shell in a PTY
@@ -142,6 +145,10 @@ fn childSetup(pty: *Pty, env: ShellEnv) !void {
 
     // Close master fd (child doesn't need it)
     posix.close(pty.master_fd);
+
+    if (env.uid != null and env.gid != null) {
+        try user.applyIdentityRaw(env.user, env.uid.?, env.gid.?);
+    }
 
     // Set environment variables (same as SSH does)
     _ = setenv("TERM", env.term, 1);

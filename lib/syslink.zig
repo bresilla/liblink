@@ -52,6 +52,7 @@ pub const connection = @import("connection.zig");
 
 pub const platform = struct {
     pub const pty = @import("platform/pty.zig");
+    pub const user = @import("platform/user.zig");
 };
 
 pub const ChannelData = @import("protocol/channel.zig").ChannelData;
