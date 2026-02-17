@@ -35,6 +35,7 @@ pub const runquic = runquic_mod;
 
 pub const network = struct {
     pub const udp = @import("network/udp.zig");
+    pub const endpoint = @import("network/endpoint.zig");
 };
 
 pub const auth = struct {

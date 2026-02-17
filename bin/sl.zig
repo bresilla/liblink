@@ -628,25 +628,13 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.process.exit(1);
     }
 
-    const host = host_arg.?;
-    var username: []const u8 = "root";
-    var hostname: []const u8 = undefined;
-    var port: u16 = 2222;
-
-    if (std.mem.indexOf(u8, host, "@")) |at_pos| {
-        username = host[0..at_pos];
-        hostname = host[at_pos + 1 ..];
-    } else {
-        hostname = host;
-    }
-
-    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
-        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
-            std.debug.print("Error: Invalid port number\n", .{});
-            std.process.exit(1);
-        };
-        hostname = hostname[0..colon_pos];
-    }
+    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
+        std.debug.print("Error: Invalid endpoint format\n", .{});
+        std.process.exit(1);
+    };
+    const username = endpoint.username;
+    const hostname = endpoint.host;
+    const port = endpoint.port;
 
     std.debug.print("Connecting to {s}:{d} as {s}...\n", .{ hostname, port, username });
 
@@ -846,24 +834,13 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     }
     const command = command_buf.items;
 
-    var username: []const u8 = "root";
-    var hostname: []const u8 = undefined;
-    var port: u16 = 2222;
-
-    if (std.mem.indexOf(u8, host_arg, "@")) |at_pos| {
-        username = host_arg[0..at_pos];
-        hostname = host_arg[at_pos + 1 ..];
-    } else {
-        hostname = host_arg;
-    }
-
-    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
-        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
-            std.debug.print("Error: Invalid port number\n", .{});
-            std.process.exit(1);
-        };
-        hostname = hostname[0..colon_pos];
-    }
+    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg, "root", 2222) catch {
+        std.debug.print("Error: Invalid endpoint format\n", .{});
+        std.process.exit(1);
+    };
+    const username = endpoint.username;
+    const hostname = endpoint.host;
+    const port = endpoint.port;
 
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
@@ -993,26 +970,13 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.process.exit(1);
     }
 
-    const host_arg_val = host_arg.?;
-
-    var username: []const u8 = "root";
-    var hostname: []const u8 = undefined;
-    var port: u16 = 2222;
-
-    if (std.mem.indexOf(u8, host_arg_val, "@")) |at_pos| {
-        username = host_arg_val[0..at_pos];
-        hostname = host_arg_val[at_pos + 1 ..];
-    } else {
-        hostname = host_arg_val;
-    }
-
-    if (std.mem.indexOf(u8, hostname, ":")) |colon_pos| {
-        port = std.fmt.parseInt(u16, hostname[colon_pos + 1 ..], 10) catch {
-            std.debug.print("Error: Invalid port number\n", .{});
-            std.process.exit(1);
-        };
-        hostname = hostname[0..colon_pos];
-    }
+    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
+        std.debug.print("Error: Invalid endpoint format\n", .{});
+        std.process.exit(1);
+    };
+    const username = endpoint.username;
+    const hostname = endpoint.host;
+    const port = endpoint.port;
 
     std.debug.print("Connecting to {s}:{d} for SFTP...\n", .{ hostname, port });
 
