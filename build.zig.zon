@@ -1,6 +1,6 @@
 .{
     .name = .syslink,
-    .version = "0.0.4",
+    .version = "0.0.2",
     .dependencies = .{
         .runquic = .{
             .url = "https://github.com/bresilla/runquic/archive/refs/tags/0.0.4.tar.gz",
