@@ -1151,17 +1151,9 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
 fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const handle = client.opendir(path) catch |err| {
+    const entries = syslink.sftp.workflow.listDirectory(client, path) catch |err| {
         var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error opening directory: {}\n", .{err});
-        try stdout.writeAll(msg);
-        return;
-    };
-    defer client.close(handle) catch {};
-
-    const entries = client.readdir(handle) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error reading directory: {}\n", .{err});
+        const msg = try std.fmt.bufPrint(&buf, "Error listing directory: {}\n", .{err});
         try stdout.writeAll(msg);
         return;
     };
@@ -1181,48 +1173,12 @@ fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCli
 fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const attrs = syslink.sftp.attributes.FileAttributes.init();
-    const handle = client.open(remote_path, .{ .read = true }, attrs) catch |err| {
+    const total_bytes = syslink.sftp.workflow.downloadFileToLocal(allocator, client, remote_path, local_path) catch |err| {
         var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
+        const msg = try std.fmt.bufPrint(&buf, "Error downloading file: {}\n", .{err});
         try stdout.writeAll(msg);
         return;
     };
-    defer client.close(handle) catch {};
-
-    const local_file = std.fs.cwd().createFile(local_path, .{}) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error creating local file: {}\n", .{err});
-        try stdout.writeAll(msg);
-        return;
-    };
-    defer local_file.close();
-
-    var offset: u64 = 0;
-    var total_bytes: u64 = 0;
-
-    while (true) {
-        const data = client.read(handle, offset, 32768) catch |err| {
-            if (err == error.Eof) break;
-            var buf: [256]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&buf, "Error reading file: {}\n", .{err});
-            try stdout.writeAll(msg);
-            return;
-        };
-        defer allocator.free(data);
-
-        if (data.len == 0) break;
-
-        local_file.writeAll(data) catch |err| {
-            var buf: [256]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&buf, "Error writing to local file: {}\n", .{err});
-            try stdout.writeAll(msg);
-            return;
-        };
-
-        offset += data.len;
-        total_bytes += data.len;
-    }
 
     var buf: [512]u8 = undefined;
     const msg = try std.fmt.bufPrint(&buf, "Downloaded {} bytes to {s}\n", .{ total_bytes, local_path });
@@ -1233,47 +1189,12 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient
     _ = allocator;
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const local_file = std.fs.cwd().openFile(local_path, .{}) catch |err| {
+    const total_bytes = syslink.sftp.workflow.uploadFileFromLocal(client, local_path, remote_path) catch |err| {
         var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error opening local file: {}\n", .{err});
+        const msg = try std.fmt.bufPrint(&buf, "Error uploading file: {}\n", .{err});
         try stdout.writeAll(msg);
         return;
     };
-    defer local_file.close();
-
-    const attrs = syslink.sftp.attributes.FileAttributes.init();
-    const handle = client.open(remote_path, .{ .write = true, .creat = true, .trunc = true }, attrs) catch |err| {
-        var buf: [256]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "Error opening remote file: {}\n", .{err});
-        try stdout.writeAll(msg);
-        return;
-    };
-    defer client.close(handle) catch {};
-
-    var buffer: [32768]u8 = undefined;
-    var offset: u64 = 0;
-    var total_bytes: u64 = 0;
-
-    while (true) {
-        const bytes_read = local_file.read(&buffer) catch |err| {
-            var buf: [256]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&buf, "Error reading local file: {}\n", .{err});
-            try stdout.writeAll(msg);
-            return;
-        };
-
-        if (bytes_read == 0) break;
-
-        client.write(handle, offset, buffer[0..bytes_read]) catch |err| {
-            var buf: [256]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&buf, "Error writing to remote file: {}\n", .{err});
-            try stdout.writeAll(msg);
-            return;
-        };
-
-        offset += bytes_read;
-        total_bytes += bytes_read;
-    }
 
     var buf: [512]u8 = undefined;
     const msg = try std.fmt.bufPrint(&buf, "Uploaded {} bytes to {s}\n", .{ total_bytes, remote_path });
@@ -1283,8 +1204,7 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient
 fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const attrs = syslink.sftp.attributes.FileAttributes.init();
-    client.mkdir(path, attrs) catch |err| {
+    syslink.sftp.workflow.makeDirectory(client, path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error creating directory: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -1298,7 +1218,7 @@ fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
 fn sftpRemove(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    client.remove(path) catch |err| {
+    syslink.sftp.workflow.removeFile(client, path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error removing file: {}\n", .{err});
         try stdout.writeAll(msg);
