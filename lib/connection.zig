@@ -7,6 +7,7 @@ const kex_exchange = @import("kex/exchange.zig");
 const udp = @import("network/udp.zig");
 const constants = @import("common/constants.zig");
 const auth = @import("auth/auth.zig");
+const known_hosts = @import("auth/known_hosts.zig");
 const channels = @import("channels/channels.zig");
 const sftp = @import("sftp/sftp.zig");
 
@@ -35,6 +36,11 @@ pub const ConnectionConfig = struct {
 
     /// Random number generator
     random: std.Random,
+};
+
+pub const HostKeyTrustPolicy = enum {
+    strict,
+    accept_new,
 };
 
 /// Server configuration for accepting connections
@@ -809,6 +815,49 @@ pub fn connectClient(
     };
 
     return ClientConnection.connect(allocator, config);
+}
+
+/// Create a client connection with known-hosts trust policy.
+pub fn connectClientTrusted(
+    allocator: Allocator,
+    server_address: []const u8,
+    server_port: u16,
+    random: std.Random,
+    policy: HostKeyTrustPolicy,
+) !ClientConnection {
+    const host_key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ server_address, server_port });
+    defer allocator.free(host_key);
+
+    const trusted_owned = try known_hosts.loadFingerprintsForHost(allocator, host_key);
+    defer known_hosts.freeFingerprints(allocator, trusted_owned);
+
+    if (policy == .strict and trusted_owned.len == 0) {
+        return error.UnknownHostKey;
+    }
+
+    const trusted = try allocator.alloc([]const u8, trusted_owned.len);
+    defer allocator.free(trusted);
+    for (trusted_owned, 0..) |fp, idx| {
+        trusted[idx] = fp;
+    }
+
+    const config = ConnectionConfig{
+        .server_address = server_address,
+        .server_port = server_port,
+        .trusted_host_fingerprints = trusted,
+        .random = random,
+    };
+
+    var conn = try ClientConnection.connect(allocator, config);
+
+    if (policy == .accept_new and trusted_owned.len == 0) {
+        const observed = conn.getServerHostKeyFingerprint();
+        if (observed.len > 0) {
+            try known_hosts.addFingerprint(allocator, host_key, observed);
+        }
+    }
+
+    return conn;
 }
 
 /// Start a simple server listener (convenience wrapper)

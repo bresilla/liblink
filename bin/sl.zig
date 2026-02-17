@@ -99,6 +99,8 @@ fn printHelp() !void {
         \\CLIENT OPTIONS:
         \\    -p, --password <pass>       Use password authentication
         \\    -i, --identity <key>        Use public key authentication
+        \\    --strict-host-key           Require host to exist in known hosts
+        \\    --accept-new-host-key       Trust on first use (default)
         \\    -P, --port <port>           Server port (default: 2222)
         \\
         \\EXAMPLES:
@@ -675,35 +677,9 @@ fn connectClientWithHostTrust(
     hostname: []const u8,
     port: u16,
     random: std.Random,
+    policy: syslink.connection.HostKeyTrustPolicy,
 ) !syslink.connection.ClientConnection {
-    const host_key = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ hostname, port });
-    defer allocator.free(host_key);
-
-    const trusted = try syslink.auth.known_hosts.loadFingerprintsForHost(allocator, host_key);
-    defer syslink.auth.known_hosts.freeFingerprints(allocator, trusted);
-
-    var trusted_const = try allocator.alloc([]const u8, trusted.len);
-    defer allocator.free(trusted_const);
-    for (trusted, 0..) |fp, idx| {
-        trusted_const[idx] = fp;
-    }
-
-    const config = syslink.connection.ConnectionConfig{
-        .server_address = hostname,
-        .server_port = port,
-        .trusted_host_fingerprints = trusted_const,
-        .random = random,
-    };
-
-    var conn = try syslink.connection.ClientConnection.connect(allocator, config);
-
-    const observed = conn.getServerHostKeyFingerprint();
-    if (observed.len > 0 and trusted.len == 0) {
-        try syslink.auth.known_hosts.addFingerprint(allocator, host_key, observed);
-        std.debug.print("✓ Added host fingerprint to known hosts: {s}\n", .{host_key});
-    }
-
-    return conn;
+    return syslink.connection.connectClientTrusted(allocator, hostname, port, random, policy);
 }
 
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -713,12 +689,15 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.debug.print("Options:\n", .{});
         std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
+        std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
+        std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
         std.process.exit(1);
     }
 
     // Parse options
     var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
+    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -738,6 +717,10 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
             }
             i += 1;
             identity_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--strict-host-key")) {
+            trust_policy = .strict;
+        } else if (std.mem.eql(u8, arg, "--accept-new-host-key")) {
+            trust_policy = .accept_new;
         } else if (arg[0] != '-') {
             host_arg = arg;
         }
@@ -773,7 +756,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random, trust_policy) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.debug.print("\nTroubleshooting:\n", .{});
         std.debug.print("  • Check server is running: nc -u -v {s} {d}\n", .{ hostname, port });
@@ -914,12 +897,15 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.debug.print("Options:\n", .{});
         std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
+        std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
+        std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
         std.debug.print("Example: sl exec user@host \"ls -la\"\n", .{});
         std.process.exit(1);
     }
 
     var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
+    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var positionals = std.ArrayListUnmanaged([]const u8){};
     defer positionals.deinit(allocator);
 
@@ -940,6 +926,10 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
             }
             i += 1;
             identity_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--strict-host-key")) {
+            trust_policy = .strict;
+        } else if (std.mem.eql(u8, arg, "--accept-new-host-key")) {
+            trust_policy = .accept_new;
         } else {
             try positionals.append(allocator, arg);
         }
@@ -981,7 +971,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random, trust_policy) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -1065,11 +1055,14 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.debug.print("Options:\n", .{});
         std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
+        std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
+        std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
         std.process.exit(1);
     }
 
     var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
+    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -1089,6 +1082,10 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
             }
             i += 1;
             identity_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--strict-host-key")) {
+            trust_policy = .strict;
+        } else if (std.mem.eql(u8, arg, "--accept-new-host-key")) {
+            trust_policy = .accept_new;
         } else if (arg[0] != '-') {
             host_arg = arg;
         }
@@ -1125,7 +1122,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var prng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
     const random = prng.random();
 
-    var conn = connectClientWithHostTrust(allocator, hostname, port, random) catch |err| {
+    var conn = connectClientWithHostTrust(allocator, hostname, port, random, trust_policy) catch |err| {
         std.debug.print("✗ Connection failed: {}\n", .{err});
         std.process.exit(1);
     };
