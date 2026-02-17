@@ -52,6 +52,7 @@ pub const sftp = @import("sftp/sftp.zig");
 pub const connection = @import("connection.zig");
 
 pub const server = struct {
+    pub const daemon = @import("server/daemon.zig");
     pub const session_runtime = @import("server/session_runtime.zig");
 };
 
