@@ -110,12 +110,7 @@ fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remot
 test "Integration: network SFTP subsystem e2e" {
     const allocator = testing.allocator;
 
-    const enabled = std.process.getEnvVarOwned(allocator, "SYSLINK_NETWORK_SFTP_E2E") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer allocator.free(enabled);
-    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+    try network_test_utils.requireEnvEnabled(allocator, "SYSLINK_NETWORK_SFTP_E2E");
 
     const tmp_root = try std.fmt.allocPrint(allocator, "/tmp/syslink-net-sftp-e2e-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_root);
@@ -130,11 +125,7 @@ test "Integration: network SFTP subsystem e2e" {
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    var wait_count: usize = 0;
-    while (!server_ctx.ready.load(.acquire) and wait_count < 200) : (wait_count += 1) {
-        std.Thread.sleep(5_000_000);
-    }
-    try testing.expect(server_ctx.ready.load(.acquire));
+    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
     try testing.expect(!server_ctx.failed.load(.acquire));
 
     var prng = std.Random.DefaultPrng.init(0x1357_2468);

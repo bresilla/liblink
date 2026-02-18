@@ -105,12 +105,7 @@ fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void
 test "Integration: network exec e2e returns stdout stderr and exit-status" {
     const allocator = testing.allocator;
 
-    const enabled = std.process.getEnvVarOwned(allocator, "SYSLINK_NETWORK_EXEC_E2E") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return error.SkipZigTest,
-        else => return err,
-    };
-    defer allocator.free(enabled);
-    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+    try network_test_utils.requireEnvEnabled(allocator, "SYSLINK_NETWORK_EXEC_E2E");
 
     var server_ctx = ServerThreadCtx{
         .allocator = allocator,
@@ -119,11 +114,7 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    var wait_count: usize = 0;
-    while (!server_ctx.ready.load(.acquire) and wait_count < 200) : (wait_count += 1) {
-        std.Thread.sleep(5_000_000);
-    }
-    try testing.expect(server_ctx.ready.load(.acquire));
+    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
     try testing.expect(!server_ctx.failed.load(.acquire));
 
     var prng = std.Random.DefaultPrng.init(0xdead_babe);

@@ -25,6 +25,24 @@ pub fn chooseTestPort(base: u16) u16 {
     return base + @as(u16, @intCast(ts % 2000));
 }
 
+pub fn requireEnvEnabled(allocator: std.mem.Allocator, env_var: []const u8) !void {
+    const enabled = std.process.getEnvVarOwned(allocator, env_var) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer allocator.free(enabled);
+
+    if (!std.mem.eql(u8, enabled, "1")) return error.SkipZigTest;
+}
+
+pub fn waitForReadyFlag(ready: *std.atomic.Value(bool), max_attempts: usize, sleep_ms: u64) bool {
+    var wait_count: usize = 0;
+    while (!ready.load(.acquire) and wait_count < max_attempts) : (wait_count += 1) {
+        std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
+    }
+    return ready.load(.acquire);
+}
+
 pub fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, timeout_ms: u32) !u64 {
     const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (std.time.milliTimestamp() < deadline_ms) {
