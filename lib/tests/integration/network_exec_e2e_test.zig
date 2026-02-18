@@ -3,31 +3,7 @@ const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
-const USERNAME = "e2e-user";
-const PASSWORD = "e2e-pass";
 const EXPECTED_COMMAND = "printf deterministic-exec";
-
-fn validatePassword(username: []const u8, password: []const u8) bool {
-    return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, password, PASSWORD);
-}
-
-fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
-    const alg = "ssh-ed25519";
-    const size = 4 + alg.len + 4 + 32;
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
-
-    var writer = syslink.protocol.wire.Writer{ .buffer = buffer };
-    try writer.writeString(alg);
-    try writer.writeString(public_key);
-    return buffer;
-}
-
-fn chooseTestPort() u16 {
-    const ts: u64 = @intCast(std.time.nanoTimestamp());
-    const base: u16 = 42000;
-    return base + @as(u16, @intCast(ts % 2000));
-}
 
 const ServerThreadCtx = struct {
     allocator: std.mem.Allocator,
@@ -44,7 +20,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var host_private_key: [64]u8 = undefined;
     @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
 
-    const host_key_blob = encodeHostKeyBlob(ctx.allocator, &ed_keypair.public_key.bytes) catch {
+    const host_key_blob = network_test_utils.encodeHostKeyBlob(ctx.allocator, &ed_keypair.public_key.bytes) catch {
         ctx.failed.store(true, .release);
         return;
     };
@@ -71,7 +47,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     };
     defer listener.removeConnection(server_conn);
 
-    const auth_ok = server_conn.handleAuthentication(validatePassword, null) catch {
+    const auth_ok = server_conn.handleAuthentication(network_test_utils.validatePassword, null) catch {
         ctx.failed.store(true, .release);
         return;
     };
@@ -138,7 +114,7 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
 
     var server_ctx = ServerThreadCtx{
         .allocator = allocator,
-        .port = chooseTestPort(),
+        .port = network_test_utils.chooseTestPort(42000),
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
@@ -156,7 +132,7 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
     var client = try syslink.connection.connectClient(allocator, "127.0.0.1", server_ctx.port, random);
     defer client.deinit();
 
-    const authed = try client.authenticatePassword(USERNAME, PASSWORD);
+    const authed = try client.authenticatePassword(network_test_utils.USERNAME, network_test_utils.PASSWORD);
     try testing.expect(authed);
 
     var session = try client.requestExec(EXPECTED_COMMAND);

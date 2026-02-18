@@ -3,31 +3,6 @@ const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
-const USERNAME = "e2e-user";
-const PASSWORD = "e2e-pass";
-
-fn validatePassword(username: []const u8, password: []const u8) bool {
-    return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, password, PASSWORD);
-}
-
-fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
-    const alg = "ssh-ed25519";
-    const size = 4 + alg.len + 4 + 32;
-    const buffer = try allocator.alloc(u8, size);
-    errdefer allocator.free(buffer);
-
-    var writer = syslink.protocol.wire.Writer{ .buffer = buffer };
-    try writer.writeString(alg);
-    try writer.writeString(public_key);
-    return buffer;
-}
-
-fn chooseTestPort() u16 {
-    const ts: u64 = @intCast(std.time.nanoTimestamp());
-    const base: u16 = 40000;
-    return base + @as(u16, @intCast(ts % 2000));
-}
-
 const ServerThreadCtx = struct {
     allocator: std.mem.Allocator,
     port: u16,
@@ -44,7 +19,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var host_private_key: [64]u8 = undefined;
     @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
 
-    const host_key_blob = encodeHostKeyBlob(ctx.allocator, &ed_keypair.public_key.bytes) catch {
+    const host_key_blob = network_test_utils.encodeHostKeyBlob(ctx.allocator, &ed_keypair.public_key.bytes) catch {
         ctx.failed.store(true, .release);
         return;
     };
@@ -71,7 +46,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     };
     defer listener.removeConnection(server_conn);
 
-    const auth_ok = server_conn.handleAuthentication(validatePassword, null) catch {
+    const auth_ok = server_conn.handleAuthentication(network_test_utils.validatePassword, null) catch {
         ctx.failed.store(true, .release);
         return;
     };
@@ -149,7 +124,7 @@ test "Integration: network SFTP subsystem e2e" {
 
     var server_ctx = ServerThreadCtx{
         .allocator = allocator,
-        .port = chooseTestPort(),
+        .port = network_test_utils.chooseTestPort(40000),
         .remote_root = tmp_root,
     };
 
@@ -168,7 +143,7 @@ test "Integration: network SFTP subsystem e2e" {
     var client = try syslink.connection.connectClient(allocator, "127.0.0.1", server_ctx.port, random);
     defer client.deinit();
 
-    const authed = try client.authenticatePassword(USERNAME, PASSWORD);
+    const authed = try client.authenticatePassword(network_test_utils.USERNAME, network_test_utils.PASSWORD);
     try testing.expect(authed);
 
     var sftp_channel = try client.openSftp();
