@@ -8,24 +8,11 @@ const ServerThreadCtx = struct {
 };
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
-    var prng = std.Random.DefaultPrng.init(0x1234_5678);
-    const random = prng.random();
-
-    var server = network_test_utils.startLocalTestServer(ctx.base.allocator, ctx.base.port, random) catch {
+    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(&ctx.base, 0x1234_5678) catch {
         network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
-    defer server.deinit();
-
-    ctx.base.ready.store(true, .release);
-
-    const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
-        network_test_utils.markFailed(&ctx.base.failed);
-        return;
-    };
-    defer {
-        server.listener.removeConnection(server_conn);
-    }
+    defer accepted.deinit();
 
     ctx.auth_ok.store(true, .release);
 }

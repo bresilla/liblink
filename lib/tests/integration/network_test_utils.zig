@@ -15,6 +15,16 @@ pub const RunningServer = struct {
     }
 };
 
+pub const AcceptedServer = struct {
+    server: RunningServer,
+    conn: *syslink.connection.ServerConnection,
+
+    pub fn deinit(self: *AcceptedServer) void {
+        self.server.listener.removeConnection(self.conn);
+        self.server.deinit();
+    }
+};
+
 pub const CommonServerThreadCtx = struct {
     allocator: std.mem.Allocator,
     port: u16,
@@ -73,6 +83,23 @@ pub fn startLocalTestServer(
         .allocator = allocator,
         .listener = listener,
         .host_key_blob = host_key_blob,
+    };
+}
+
+pub fn startAndAcceptAuthenticatedServer(base: *CommonServerThreadCtx, prng_seed: u64) !AcceptedServer {
+    var prng = std.Random.DefaultPrng.init(prng_seed);
+    const random = prng.random();
+
+    var server = try startLocalTestServer(base.allocator, base.port, random);
+    errdefer server.deinit();
+
+    base.ready.store(true, .release);
+
+    const conn = try acceptAuthenticatedConnection(&server.listener);
+
+    return .{
+        .server = server,
+        .conn = conn,
     };
 }
 

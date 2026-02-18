@@ -8,24 +8,13 @@ const EXPECTED_COMMAND = "printf deterministic-exec";
 const ServerThreadCtx = network_test_utils.CommonServerThreadCtx;
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
-    var prng = std.Random.DefaultPrng.init(0x2468_1357);
-    const random = prng.random();
-
-    var server = network_test_utils.startLocalTestServer(ctx.allocator, ctx.port, random) catch {
+    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(ctx, 0x2468_1357) catch {
         network_test_utils.markFailed(&ctx.failed);
         return;
     };
-    defer server.deinit();
+    defer accepted.deinit();
 
-    ctx.ready.store(true, .release);
-
-    const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
-        network_test_utils.markFailed(&ctx.failed);
-        return;
-    };
-    defer server.listener.removeConnection(server_conn);
-
-    tryHandleExecSession(server_conn) catch {
+    tryHandleExecSession(accepted.conn) catch {
         network_test_utils.markFailed(&ctx.failed);
         return;
     };
