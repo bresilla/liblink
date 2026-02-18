@@ -88,18 +88,7 @@ pub const SessionRuntime = struct {
     }
 
     pub fn run(self: *Self, server_conn: *connection.ServerConnection) !void {
-        try server_conn.transport.poll(30000);
-
-        var stream_id: u64 = 0;
-        var found = false;
-        var test_stream: u64 = 4;
-        while (test_stream < 24) : (test_stream += 4) {
-            server_conn.channel_manager.acceptChannel(test_stream) catch continue;
-            stream_id = test_stream;
-            found = true;
-            break;
-        }
-        if (!found) return error.NoSessionChannel;
+        const stream_id = try self.waitForSessionChannel(server_conn, 30000);
 
         if (self.active_shells.fetchRemove(stream_id)) |entry| {
             var old = entry.value;
@@ -132,6 +121,27 @@ pub const SessionRuntime = struct {
             .exec => try self.runExecRequest(server_conn, stream_id),
             .subsystem_sftp => try self.runSftpSubsystem(server_conn, stream_id),
         }
+    }
+
+    fn waitForSessionChannel(self: *Self, server_conn: *connection.ServerConnection, timeout_ms: u32) !u64 {
+        _ = self;
+
+        const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        while (std.time.milliTimestamp() < deadline_ms) {
+            server_conn.transport.poll(50) catch {};
+
+            const stream_id = server_conn.acceptChannel() catch |err| {
+                switch (err) {
+                    error.NoData, error.WouldBlock, error.PacketTooSmall => {},
+                    else => std.log.debug("acceptChannel while waiting for session: {}", .{err}),
+                }
+                std.Thread.sleep(2 * std.time.ns_per_ms);
+                continue;
+            };
+            return stream_id;
+        }
+
+        return error.ChannelAcceptTimeout;
     }
 
     fn handleRequest(self: *Self, server_conn: *connection.ServerConnection, stream_id: u64, request_info: *channels.ChannelRequestInfo) !void {

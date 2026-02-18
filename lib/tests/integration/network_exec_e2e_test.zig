@@ -86,20 +86,19 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 }
 
 fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void {
-    try server_conn.transport.poll(30000);
-    try server_conn.channel_manager.acceptChannel(4);
+    const stream_id = try waitForSessionChannel(server_conn, 30000);
 
     var request_buf: [4096]u8 = undefined;
     while (true) {
         try server_conn.transport.poll(30000);
-        const len = try server_conn.transport.receiveFromStream(4, &request_buf);
+        const len = try server_conn.transport.receiveFromStream(stream_id, &request_buf);
         if (len == 0) continue;
 
-        var req = try server_conn.channel_manager.handleRequest(4, request_buf[0..len]);
+        var req = try server_conn.channel_manager.handleRequest(stream_id, request_buf[0..len]);
         defer req.deinit(server_conn.allocator);
 
         if (!std.mem.eql(u8, req.request.request_type, "exec")) {
-            try server_conn.channel_manager.sendFailure(4);
+            try server_conn.channel_manager.sendFailure(stream_id);
             continue;
         }
 
@@ -110,20 +109,35 @@ fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void
             return error.UnexpectedCommand;
         }
 
-        try server_conn.channel_manager.sendSuccess(4);
+        try server_conn.channel_manager.sendSuccess(stream_id);
         break;
     }
 
-    try server_conn.channel_manager.sendData(4, "stdout-part-1 ");
-    try server_conn.channel_manager.sendData(4, "stdout-part-2\n");
-    try server_conn.channel_manager.sendExtendedData(4, 1, "stderr-part\n");
+    try server_conn.channel_manager.sendData(stream_id, "stdout-part-1 ");
+    try server_conn.channel_manager.sendData(stream_id, "stdout-part-2\n");
+    try server_conn.channel_manager.sendExtendedData(stream_id, 1, "stderr-part\n");
 
     var status_data: [4]u8 = undefined;
     std.mem.writeInt(u32, &status_data, 23, .big);
-    try server_conn.channel_manager.sendRequest(4, "exit-status", false, &status_data);
+    try server_conn.channel_manager.sendRequest(stream_id, "exit-status", false, &status_data);
 
-    try server_conn.channel_manager.sendEof(4);
-    try server_conn.channel_manager.closeChannel(4);
+    try server_conn.channel_manager.sendEof(stream_id);
+    try server_conn.channel_manager.closeChannel(stream_id);
+}
+
+fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, timeout_ms: u32) !u64 {
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline_ms) {
+        server_conn.transport.poll(50) catch {};
+
+        const stream_id = server_conn.acceptChannel() catch {
+            std.Thread.sleep(2 * std.time.ns_per_ms);
+            continue;
+        };
+        return stream_id;
+    }
+
+    return error.ChannelAcceptTimeout;
 }
 
 test "Integration: network exec e2e returns stdout stderr and exit-status" {
