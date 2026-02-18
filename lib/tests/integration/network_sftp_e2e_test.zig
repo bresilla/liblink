@@ -15,45 +15,19 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var prng = std.Random.DefaultPrng.init(0x9abc_def0);
     const random = prng.random();
 
-    const ed_keypair = std.crypto.sign.Ed25519.KeyPair.generate();
-    var host_private_key: [64]u8 = undefined;
-    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
-
-    const host_key_blob = network_test_utils.encodeHostKeyBlob(ctx.allocator, &ed_keypair.public_key.bytes) catch {
+    var server = network_test_utils.startLocalTestServer(ctx.allocator, ctx.port, random) catch {
         ctx.failed.store(true, .release);
         return;
     };
-    defer ctx.allocator.free(host_key_blob);
-
-    var listener = syslink.connection.startServer(
-        ctx.allocator,
-        "127.0.0.1",
-        ctx.port,
-        host_key_blob,
-        &host_private_key,
-        random,
-    ) catch {
-        ctx.failed.store(true, .release);
-        return;
-    };
-    defer listener.deinit();
+    defer server.deinit();
 
     ctx.ready.store(true, .release);
 
-    const server_conn = listener.acceptConnection() catch {
+    const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
         ctx.failed.store(true, .release);
         return;
     };
-    defer listener.removeConnection(server_conn);
-
-    const auth_ok = server_conn.handleAuthentication(network_test_utils.validatePassword, null) catch {
-        ctx.failed.store(true, .release);
-        return;
-    };
-    if (!auth_ok) {
-        ctx.failed.store(true, .release);
-        return;
-    }
+    defer server.listener.removeConnection(server_conn);
 
     tryHandleSftpSession(server_conn, ctx.remote_root) catch {
         ctx.failed.store(true, .release);

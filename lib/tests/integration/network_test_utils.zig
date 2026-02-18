@@ -4,6 +4,17 @@ const syslink = @import("../../syslink.zig");
 pub const USERNAME = "e2e-user";
 pub const PASSWORD = "e2e-pass";
 
+pub const RunningServer = struct {
+    allocator: std.mem.Allocator,
+    listener: syslink.connection.ConnectionListener,
+    host_key_blob: []u8,
+
+    pub fn deinit(self: *RunningServer) void {
+        self.listener.deinit();
+        self.allocator.free(self.host_key_blob);
+    }
+};
+
 pub fn validatePassword(username: []const u8, password: []const u8) bool {
     return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, password, PASSWORD);
 }
@@ -23,6 +34,45 @@ pub fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8
 pub fn chooseTestPort(base: u16) u16 {
     const ts: u64 = @intCast(std.time.nanoTimestamp());
     return base + @as(u16, @intCast(ts % 2000));
+}
+
+pub fn startLocalTestServer(
+    allocator: std.mem.Allocator,
+    port: u16,
+    random: std.Random,
+) !RunningServer {
+    const ed_keypair = std.crypto.sign.Ed25519.KeyPair.generate();
+    var host_private_key: [64]u8 = undefined;
+    @memcpy(&host_private_key, &ed_keypair.secret_key.bytes);
+
+    const host_key_blob = try encodeHostKeyBlob(allocator, &ed_keypair.public_key.bytes);
+    errdefer allocator.free(host_key_blob);
+
+    var listener = try syslink.connection.startServer(
+        allocator,
+        "127.0.0.1",
+        port,
+        host_key_blob,
+        &host_private_key,
+        random,
+    );
+    errdefer listener.deinit();
+
+    return .{
+        .allocator = allocator,
+        .listener = listener,
+        .host_key_blob = host_key_blob,
+    };
+}
+
+pub fn acceptAuthenticatedConnection(listener: *syslink.connection.ConnectionListener) !*syslink.connection.ServerConnection {
+    const server_conn = try listener.acceptConnection();
+    const auth_ok = try server_conn.handleAuthentication(validatePassword, null);
+    if (!auth_ok) {
+        listener.removeConnection(server_conn);
+        return error.AuthenticationFailed;
+    }
+    return server_conn;
 }
 
 pub fn requireEnvEnabled(allocator: std.mem.Allocator, env_var: []const u8) !void {
