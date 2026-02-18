@@ -27,32 +27,20 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 
 fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remote_root: []const u8) !void {
     const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
+    const request_data = try network_test_utils.waitForChannelRequestType(
+        server_conn,
+        stream_id,
+        "subsystem",
+        network_test_utils.SESSION_CHANNEL_TIMEOUT_MS,
+    );
+    defer server_conn.allocator.free(request_data);
 
-    var request_buf: [4096]u8 = undefined;
-    while (true) {
-        try server_conn.transport.poll(network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
-        const len = try server_conn.transport.receiveFromStream(stream_id, &request_buf);
-        if (len == 0) continue;
+    var reader = syslink.protocol.wire.Reader{ .buffer = request_data };
+    const subsystem_name = try reader.readString(server_conn.allocator);
+    defer server_conn.allocator.free(subsystem_name);
 
-        var req = try server_conn.channel_manager.handleRequest(stream_id, request_buf[0..len]);
-        defer req.deinit(server_conn.allocator);
-
-        if (!std.mem.eql(u8, req.request.request_type, "subsystem")) {
-            try server_conn.channel_manager.sendFailure(stream_id);
-            continue;
-        }
-
-        var reader = syslink.protocol.wire.Reader{ .buffer = req.request.type_specific_data };
-        const subsystem_name = try reader.readString(server_conn.allocator);
-        defer server_conn.allocator.free(subsystem_name);
-
-        if (!std.mem.eql(u8, subsystem_name, "sftp")) {
-            try server_conn.channel_manager.sendFailure(stream_id);
-            return error.UnsupportedSubsystem;
-        }
-
-        try server_conn.channel_manager.sendSuccess(stream_id);
-        break;
+    if (!std.mem.eql(u8, subsystem_name, "sftp")) {
+        return error.UnsupportedSubsystem;
     }
 
     const session_channel = syslink.channels.SessionChannel{

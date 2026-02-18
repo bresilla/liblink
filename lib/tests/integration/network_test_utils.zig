@@ -168,3 +168,33 @@ pub fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, 
 
     return error.ChannelAcceptTimeout;
 }
+
+pub fn waitForChannelRequestType(
+    server_conn: *syslink.connection.ServerConnection,
+    stream_id: u64,
+    expected_request_type: []const u8,
+    timeout_ms: u32,
+) ![]u8 {
+    var request_buf: [4096]u8 = undefined;
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+
+    while (std.time.milliTimestamp() < deadline_ms) {
+        server_conn.transport.poll(50) catch {};
+
+        const len = server_conn.transport.receiveFromStream(stream_id, &request_buf) catch continue;
+        if (len == 0) continue;
+
+        var req = try server_conn.channel_manager.handleRequest(stream_id, request_buf[0..len]);
+        defer req.deinit(server_conn.allocator);
+
+        if (!std.mem.eql(u8, req.request.request_type, expected_request_type)) {
+            try server_conn.channel_manager.sendFailure(stream_id);
+            continue;
+        }
+
+        try server_conn.channel_manager.sendSuccess(stream_id);
+        return try server_conn.allocator.dupe(u8, req.request.type_specific_data);
+    }
+
+    return error.ChannelRequestTimeout;
+}
