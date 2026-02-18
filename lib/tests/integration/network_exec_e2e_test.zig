@@ -3,12 +3,19 @@ const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
+const SERVER_PRNG_SEED: u64 = 0x2468_1357;
+const CLIENT_PRNG_SEED: u64 = 0xdead_babe;
+const TEST_PORT_BASE: u16 = 42_000;
+
 const EXPECTED_COMMAND = "printf deterministic-exec";
+const EXPECTED_STDOUT = "stdout-part-1 stdout-part-2\n";
+const EXPECTED_STDERR = "stderr-part\n";
+const EXPECTED_EXIT_STATUS: ?u32 = 23;
 
 const ServerThreadCtx = network_test_utils.CommonServerThreadCtx;
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
-    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(ctx, 0x2468_1357) catch {
+    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(ctx, SERVER_PRNG_SEED) catch {
         network_test_utils.markFailed(&ctx.failed);
         return;
     };
@@ -21,11 +28,11 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 }
 
 fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void {
-    const stream_id = try network_test_utils.waitForSessionChannel(server_conn, 30000);
+    const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
 
     var request_buf: [4096]u8 = undefined;
     while (true) {
-        try server_conn.transport.poll(30000);
+        try server_conn.transport.poll(network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
         const len = try server_conn.transport.receiveFromStream(stream_id, &request_buf);
         if (len == 0) continue;
 
@@ -53,7 +60,7 @@ fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void
     try server_conn.channel_manager.sendExtendedData(stream_id, 1, "stderr-part\n");
 
     var status_data: [4]u8 = undefined;
-    std.mem.writeInt(u32, &status_data, 23, .big);
+    std.mem.writeInt(u32, &status_data, @as(u32, @intCast(EXPECTED_EXIT_STATUS.?)), .big);
     try server_conn.channel_manager.sendRequest(stream_id, "exit-status", false, &status_data);
 
     try server_conn.channel_manager.sendEof(stream_id);
@@ -67,15 +74,19 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
 
     var server_ctx = ServerThreadCtx{
         .allocator = allocator,
-        .port = network_test_utils.chooseTestPort(42000),
+        .port = network_test_utils.chooseTestPort(TEST_PORT_BASE),
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
+    try testing.expect(network_test_utils.waitForReadyFlag(
+        &server_ctx.ready,
+        network_test_utils.READY_WAIT_MAX_ATTEMPTS,
+        network_test_utils.READY_WAIT_SLEEP_MS,
+    ));
     try testing.expect(!server_ctx.failed.load(.acquire));
 
-    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.port, 0xdead_babe);
+    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.port, CLIENT_PRNG_SEED);
     defer client.deinit();
 
     var session = try client.requestExec(EXPECTED_COMMAND);
@@ -84,9 +95,9 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
     var result = try syslink.channels.collectExecResult(allocator, &session, 5000);
     defer result.deinit();
 
-    try testing.expectEqualStrings("stdout-part-1 stdout-part-2\n", result.stdout);
-    try testing.expectEqualStrings("stderr-part\n", result.stderr);
-    try testing.expectEqual(@as(?u32, 23), result.exit_status);
+    try testing.expectEqualStrings(EXPECTED_STDOUT, result.stdout);
+    try testing.expectEqualStrings(EXPECTED_STDERR, result.stderr);
+    try testing.expectEqual(EXPECTED_EXIT_STATUS, result.exit_status);
 
     server_thread.join();
     try testing.expect(!server_ctx.failed.load(.acquire));

@@ -4,6 +4,10 @@ const syslink = @import("../../syslink.zig");
 pub const USERNAME = "e2e-user";
 pub const PASSWORD = "e2e-pass";
 
+pub const READY_WAIT_MAX_ATTEMPTS: usize = 200;
+pub const READY_WAIT_SLEEP_MS: u64 = 5;
+pub const SESSION_CHANNEL_TIMEOUT_MS: u32 = 30_000;
+
 pub const RunningServer = struct {
     allocator: std.mem.Allocator,
     listener: syslink.connection.ConnectionListener,

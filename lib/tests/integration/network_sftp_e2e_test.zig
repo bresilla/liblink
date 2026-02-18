@@ -3,13 +3,17 @@ const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
+const SERVER_PRNG_SEED: u64 = 0x9abc_def0;
+const CLIENT_PRNG_SEED: u64 = 0x1357_2468;
+const TEST_PORT_BASE: u16 = 40_000;
+
 const ServerThreadCtx = struct {
     base: network_test_utils.CommonServerThreadCtx,
     remote_root: []const u8,
 };
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
-    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(&ctx.base, 0x9abc_def0) catch {
+    var accepted = network_test_utils.startAndAcceptAuthenticatedServer(&ctx.base, SERVER_PRNG_SEED) catch {
         network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
@@ -22,11 +26,11 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 }
 
 fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remote_root: []const u8) !void {
-    const stream_id = try network_test_utils.waitForSessionChannel(server_conn, 30000);
+    const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
 
     var request_buf: [4096]u8 = undefined;
     while (true) {
-        try server_conn.transport.poll(30000);
+        try server_conn.transport.poll(network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
         const len = try server_conn.transport.receiveFromStream(stream_id, &request_buf);
         if (len == 0) continue;
 
@@ -80,17 +84,21 @@ test "Integration: network SFTP subsystem e2e" {
     var server_ctx = ServerThreadCtx{
         .base = .{
             .allocator = allocator,
-            .port = network_test_utils.chooseTestPort(40000),
+            .port = network_test_utils.chooseTestPort(TEST_PORT_BASE),
         },
         .remote_root = tmp_root,
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.base.ready, 200, 5));
+    try testing.expect(network_test_utils.waitForReadyFlag(
+        &server_ctx.base.ready,
+        network_test_utils.READY_WAIT_MAX_ATTEMPTS,
+        network_test_utils.READY_WAIT_SLEEP_MS,
+    ));
     try testing.expect(!server_ctx.base.failed.load(.acquire));
 
-    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.base.port, 0x1357_2468);
+    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.base.port, CLIENT_PRNG_SEED);
     defer client.deinit();
 
     var sftp_channel = try client.openSftp();
