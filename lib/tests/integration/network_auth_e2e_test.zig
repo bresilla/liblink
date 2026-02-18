@@ -37,12 +37,7 @@ test "Integration: network client/server password auth e2e" {
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    try testing.expect(network_test_utils.waitForReadyFlag(
-        &server_ctx.base.ready,
-        network_test_utils.READY_WAIT_MAX_ATTEMPTS,
-        network_test_utils.READY_WAIT_SLEEP_MS,
-    ));
-    try testing.expect(!server_ctx.base.failed.load(.acquire));
+    try network_test_utils.waitForServerReady(&server_ctx.base);
 
     var client = try network_test_utils.connectAuthenticatedClient(allocator, port, CLIENT_PRNG_SEED);
     defer client.deinit();

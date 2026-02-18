@@ -154,6 +154,16 @@ pub fn waitForReadyFlag(ready: *std.atomic.Value(bool), max_attempts: usize, sle
     return ready.load(.acquire);
 }
 
+pub fn waitForServerReady(base: *CommonServerThreadCtx) !void {
+    const ready = waitForReadyFlag(
+        &base.ready,
+        READY_WAIT_MAX_ATTEMPTS,
+        READY_WAIT_SLEEP_MS,
+    );
+    if (!ready) return error.ServerReadyTimeout;
+    if (base.failed.load(.acquire)) return error.ServerStartupFailed;
+}
+
 pub fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, timeout_ms: u32) !u64 {
     const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (std.time.milliTimestamp() < deadline_ms) {
