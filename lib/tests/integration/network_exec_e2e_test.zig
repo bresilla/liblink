@@ -5,19 +5,14 @@ const network_test_utils = @import("network_test_utils.zig");
 
 const EXPECTED_COMMAND = "printf deterministic-exec";
 
-const ServerThreadCtx = struct {
-    allocator: std.mem.Allocator,
-    port: u16,
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-};
+const ServerThreadCtx = network_test_utils.CommonServerThreadCtx;
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var prng = std.Random.DefaultPrng.init(0x2468_1357);
     const random = prng.random();
 
     var server = network_test_utils.startLocalTestServer(ctx.allocator, ctx.port, random) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.failed);
         return;
     };
     defer server.deinit();
@@ -25,13 +20,13 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     ctx.ready.store(true, .release);
 
     const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.failed);
         return;
     };
     defer server.listener.removeConnection(server_conn);
 
     tryHandleExecSession(server_conn) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.failed);
         return;
     };
 }

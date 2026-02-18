@@ -4,33 +4,30 @@ const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
 const ServerThreadCtx = struct {
-    allocator: std.mem.Allocator,
-    port: u16,
+    base: network_test_utils.CommonServerThreadCtx,
     remote_root: []const u8,
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var prng = std.Random.DefaultPrng.init(0x9abc_def0);
     const random = prng.random();
 
-    var server = network_test_utils.startLocalTestServer(ctx.allocator, ctx.port, random) catch {
-        ctx.failed.store(true, .release);
+    var server = network_test_utils.startLocalTestServer(ctx.base.allocator, ctx.base.port, random) catch {
+        network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
     defer server.deinit();
 
-    ctx.ready.store(true, .release);
+    ctx.base.ready.store(true, .release);
 
     const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
     defer server.listener.removeConnection(server_conn);
 
     tryHandleSftpSession(server_conn, ctx.remote_root) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
 }
@@ -92,17 +89,19 @@ test "Integration: network SFTP subsystem e2e" {
     try std.fs.cwd().makePath(tmp_root);
 
     var server_ctx = ServerThreadCtx{
-        .allocator = allocator,
-        .port = network_test_utils.chooseTestPort(40000),
+        .base = .{
+            .allocator = allocator,
+            .port = network_test_utils.chooseTestPort(40000),
+        },
         .remote_root = tmp_root,
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
-    try testing.expect(!server_ctx.failed.load(.acquire));
+    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.base.ready, 200, 5));
+    try testing.expect(!server_ctx.base.failed.load(.acquire));
 
-    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.port, 0x1357_2468);
+    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.base.port, 0x1357_2468);
     defer client.deinit();
 
     var sftp_channel = try client.openSftp();
@@ -128,5 +127,5 @@ test "Integration: network SFTP subsystem e2e" {
     try sftp_client.rmdir("/docs");
 
     server_thread.join();
-    try testing.expect(!server_ctx.failed.load(.acquire));
+    try testing.expect(!server_ctx.base.failed.load(.acquire));
 }

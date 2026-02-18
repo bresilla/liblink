@@ -3,27 +3,24 @@ const testing = std.testing;
 const network_test_utils = @import("network_test_utils.zig");
 
 const ServerThreadCtx = struct {
-    allocator: std.mem.Allocator,
-    port: u16,
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    base: network_test_utils.CommonServerThreadCtx,
     auth_ok: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
     var prng = std.Random.DefaultPrng.init(0x1234_5678);
     const random = prng.random();
 
-    var server = network_test_utils.startLocalTestServer(ctx.allocator, ctx.port, random) catch {
-        ctx.failed.store(true, .release);
+    var server = network_test_utils.startLocalTestServer(ctx.base.allocator, ctx.base.port, random) catch {
+        network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
     defer server.deinit();
 
-    ctx.ready.store(true, .release);
+    ctx.base.ready.store(true, .release);
 
     const server_conn = network_test_utils.acceptAuthenticatedConnection(&server.listener) catch {
-        ctx.failed.store(true, .release);
+        network_test_utils.markFailed(&ctx.base.failed);
         return;
     };
     defer {
@@ -41,19 +38,21 @@ test "Integration: network client/server password auth e2e" {
     const port = network_test_utils.chooseTestPort(38000);
 
     var server_ctx = ServerThreadCtx{
-        .allocator = allocator,
-        .port = port,
+        .base = .{
+            .allocator = allocator,
+            .port = port,
+        },
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
 
-    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
-    try testing.expect(!server_ctx.failed.load(.acquire));
+    try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.base.ready, 200, 5));
+    try testing.expect(!server_ctx.base.failed.load(.acquire));
 
     var client = try network_test_utils.connectAuthenticatedClient(allocator, port, 0xfeed_beef);
     defer client.deinit();
 
     server_thread.join();
-    try testing.expect(!server_ctx.failed.load(.acquire));
+    try testing.expect(!server_ctx.base.failed.load(.acquire));
     try testing.expect(server_ctx.auth_ok.load(.acquire));
 }

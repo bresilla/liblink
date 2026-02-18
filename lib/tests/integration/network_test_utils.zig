@@ -15,6 +15,17 @@ pub const RunningServer = struct {
     }
 };
 
+pub const CommonServerThreadCtx = struct {
+    allocator: std.mem.Allocator,
+    port: u16,
+    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+pub fn markFailed(failed: *std.atomic.Value(bool)) void {
+    failed.store(true, .release);
+}
+
 pub fn validatePassword(username: []const u8, password: []const u8) bool {
     return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, password, PASSWORD);
 }
