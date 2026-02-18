@@ -91,14 +91,8 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
     try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
     try testing.expect(!server_ctx.failed.load(.acquire));
 
-    var prng = std.Random.DefaultPrng.init(0xdead_babe);
-    const random = prng.random();
-
-    var client = try syslink.connection.connectClient(allocator, "127.0.0.1", server_ctx.port, random);
+    var client = try network_test_utils.connectAuthenticatedClient(allocator, server_ctx.port, 0xdead_babe);
     defer client.deinit();
-
-    const authed = try client.authenticatePassword(network_test_utils.USERNAME, network_test_utils.PASSWORD);
-    try testing.expect(authed);
 
     var session = try client.requestExec(EXPECTED_COMMAND);
     defer session.close() catch {};

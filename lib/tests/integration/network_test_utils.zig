@@ -75,6 +75,25 @@ pub fn acceptAuthenticatedConnection(listener: *syslink.connection.ConnectionLis
     return server_conn;
 }
 
+pub fn connectAuthenticatedClient(
+    allocator: std.mem.Allocator,
+    port: u16,
+    prng_seed: u64,
+) !syslink.connection.ClientConnection {
+    var prng = std.Random.DefaultPrng.init(prng_seed);
+    const random = prng.random();
+
+    var client = try syslink.connection.connectClient(allocator, "127.0.0.1", port, random);
+    errdefer client.deinit();
+
+    const authed = try client.authenticatePassword(USERNAME, PASSWORD);
+    if (!authed) {
+        return error.AuthenticationFailed;
+    }
+
+    return client;
+}
+
 pub fn requireEnvEnabled(allocator: std.mem.Allocator, env_var: []const u8) !void {
     const enabled = std.process.getEnvVarOwned(allocator, env_var) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return error.SkipZigTest,

@@ -1,6 +1,5 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
 const ServerThreadCtx = struct {
@@ -51,14 +50,8 @@ test "Integration: network client/server password auth e2e" {
     try testing.expect(network_test_utils.waitForReadyFlag(&server_ctx.ready, 200, 5));
     try testing.expect(!server_ctx.failed.load(.acquire));
 
-    var prng = std.Random.DefaultPrng.init(0xfeed_beef);
-    const random = prng.random();
-
-    var client = try syslink.connection.connectClient(allocator, "127.0.0.1", port, random);
+    var client = try network_test_utils.connectAuthenticatedClient(allocator, port, 0xfeed_beef);
     defer client.deinit();
-
-    const authed = try client.authenticatePassword(network_test_utils.USERNAME, network_test_utils.PASSWORD);
-    try testing.expect(authed);
 
     server_thread.join();
     try testing.expect(!server_ctx.failed.load(.acquire));
