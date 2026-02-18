@@ -131,10 +131,7 @@ pub const SessionRuntime = struct {
             server_conn.transport.poll(50) catch {};
 
             const stream_id = server_conn.acceptChannel() catch |err| {
-                switch (err) {
-                    error.NoData, error.WouldBlock, error.PacketTooSmall => {},
-                    else => std.log.debug("acceptChannel while waiting for session: {}", .{err}),
-                }
+                std.log.debug("acceptChannel while waiting for session: {}", .{err});
                 std.Thread.sleep(2 * std.time.ns_per_ms);
                 continue;
             };
