@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const syslink = @import("../../syslink.zig");
+const network_test_utils = @import("network_test_utils.zig");
 
 const USERNAME = "e2e-user";
 const PASSWORD = "e2e-pass";
@@ -86,7 +87,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 }
 
 fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remote_root: []const u8) !void {
-    const stream_id = try waitForSessionChannel(server_conn, 30000);
+    const stream_id = try network_test_utils.waitForSessionChannel(server_conn, 30000);
 
     var request_buf: [4096]u8 = undefined;
     while (true) {
@@ -129,21 +130,6 @@ fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remot
     sftp_server.run() catch |err| {
         if (err != error.EndOfStream and err != error.ConnectionClosed) return err;
     };
-}
-
-fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, timeout_ms: u32) !u64 {
-    const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline_ms) {
-        server_conn.transport.poll(50) catch {};
-
-        const stream_id = server_conn.acceptChannel() catch {
-            std.Thread.sleep(2 * std.time.ns_per_ms);
-            continue;
-        };
-        return stream_id;
-    }
-
-    return error.ChannelAcceptTimeout;
 }
 
 test "Integration: network SFTP subsystem e2e" {
