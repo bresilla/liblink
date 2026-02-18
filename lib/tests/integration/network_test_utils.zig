@@ -198,3 +198,21 @@ pub fn waitForChannelRequestType(
 
     return error.ChannelRequestTimeout;
 }
+
+pub fn waitForChannelRequestString(
+    server_conn: *syslink.connection.ServerConnection,
+    stream_id: u64,
+    expected_request_type: []const u8,
+    timeout_ms: u32,
+) ![]u8 {
+    const request_data = try waitForChannelRequestType(
+        server_conn,
+        stream_id,
+        expected_request_type,
+        timeout_ms,
+    );
+    defer server_conn.allocator.free(request_data);
+
+    var reader = syslink.protocol.wire.Reader{ .buffer = request_data };
+    return reader.readString(server_conn.allocator);
+}

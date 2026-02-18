@@ -29,16 +29,12 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 
 fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void {
     const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
-    const request_data = try network_test_utils.waitForChannelRequestType(
+    const command = try network_test_utils.waitForChannelRequestString(
         server_conn,
         stream_id,
         "exec",
         network_test_utils.SESSION_CHANNEL_TIMEOUT_MS,
     );
-    defer server_conn.allocator.free(request_data);
-
-    var reader = syslink.protocol.wire.Reader{ .buffer = request_data };
-    const command = try reader.readString(server_conn.allocator);
     defer server_conn.allocator.free(command);
     if (!std.mem.eql(u8, command, EXPECTED_COMMAND)) {
         return error.UnexpectedCommand;

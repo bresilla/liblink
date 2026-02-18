@@ -27,16 +27,12 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 
 fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remote_root: []const u8) !void {
     const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
-    const request_data = try network_test_utils.waitForChannelRequestType(
+    const subsystem_name = try network_test_utils.waitForChannelRequestString(
         server_conn,
         stream_id,
         "subsystem",
         network_test_utils.SESSION_CHANNEL_TIMEOUT_MS,
     );
-    defer server_conn.allocator.free(request_data);
-
-    var reader = syslink.protocol.wire.Reader{ .buffer = request_data };
-    const subsystem_name = try reader.readString(server_conn.allocator);
     defer server_conn.allocator.free(subsystem_name);
 
     if (!std.mem.eql(u8, subsystem_name, "sftp")) {
