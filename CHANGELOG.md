@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.4] - 2026-02-22
+
+### <!-- 0 -->⛰️  Features
+
+- Update channel protocol and KEX H calculation
+
+### <!-- 3 -->📚 Documentation
+
+- Refactor README for clarity and conciseness
+
 ## [0.0.3] - 2026-02-22
 
 ### <!-- 0 -->⛰️  Features
