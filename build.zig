@@ -19,13 +19,13 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const runquic_dep = b.dependency("runquic", .{
+    const libfast_dep = b.dependency("libfast", .{
         .target = target,
         .optimize = optimize,
     });
-    const runquic_module = runquic_dep.module("runquic");
-    const runquic_transport_module = b.createModule(.{
-        .root_source_file = runquic_dep.path("lib/transport.zig"),
+    const libfast_module = libfast_dep.module("libfast");
+    const libfast_transport_module = b.createModule(.{
+        .root_source_file = libfast_dep.path("lib/transport.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -38,8 +38,8 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
     liblink_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    liblink_module.addImport("runquic", runquic_module);
-    liblink_module.addImport("runquic_transport", runquic_transport_module);
+    liblink_module.addImport("libfast", libfast_module);
+    liblink_module.addImport("libfast_transport", libfast_transport_module);
 
     const liblink_export = b.addModule("liblink", .{
         .root_source_file = b.path("lib/liblink.zig"),
@@ -47,8 +47,8 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    liblink_export.addImport("runquic", runquic_module);
-    liblink_export.addImport("runquic_transport", runquic_transport_module);
+    liblink_export.addImport("libfast", libfast_module);
+    liblink_export.addImport("libfast_transport", libfast_transport_module);
 
     const lib = b.addLibrary(.{
         .name = "liblink",

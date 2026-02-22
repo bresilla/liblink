@@ -2,9 +2,9 @@
     .name = .liblink,
     .version = "0.0.2",
     .dependencies = .{
-        .runquic = .{
-            .url = "https://github.com/bresilla/runquic/archive/refs/tags/0.0.4.tar.gz",
-            .hash = "runquic-0.0.4-ouOgH3lDBgDlydut3jZPtPdfij1GKIk6Z_Ygdwp6fWR-",
+        .libfast = .{
+            .url = "https://github.com/bresilla/libfast/archive/refs/tags/0.0.5.tar.gz",
+            .hash = "libfast-0.0.5-Gf9gLnFDBgBPZlOqpnhEDivsxht4PtEhN5r3IzI3R1cC",
         },
     },
     .paths = .{

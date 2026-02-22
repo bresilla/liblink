@@ -1,5 +1,5 @@
 const std = @import("std");
-const runquic_mod = @import("runquic");
+const libfast_mod = @import("libfast");
 
 // Import our modules
 pub const protocol = struct {
@@ -31,7 +31,7 @@ pub const kex = struct {
     pub const exchange = @import("kex/exchange.zig");
 };
 
-pub const runquic = runquic_mod;
+pub const libfast = libfast_mod;
 
 pub const network = struct {
     pub const udp = @import("network/udp.zig");
