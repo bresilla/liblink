@@ -52,15 +52,11 @@ pub const ChannelManager = struct {
     pub fn openChannel(
         self: *Self,
         channel_type: []const u8,
-        initial_window_size: u32,
-        maximum_packet_size: u32,
         type_specific_data: []const u8,
     ) !u64 {
-        // Open the QUIC stream and use its assigned ID
         const stream_id = try self.transport.openStream();
-        self.next_client_stream_id = stream_id + 4; // Update to next expected stream
+        self.next_client_stream_id = stream_id + 4;
 
-        // Create channel info
         const info = try self.allocator.create(ChannelInfo);
         errdefer self.allocator.destroy(info);
 
@@ -74,12 +70,8 @@ pub const ChannelManager = struct {
 
         try self.channels.put(stream_id, info);
 
-        // Send CHANNEL_OPEN message
         const open_msg = channel_protocol.ChannelOpen{
             .channel_type = channel_type,
-            .sender_channel = if (stream_id > std.math.maxInt(u32)) return error.StreamIdOverflow else @intCast(stream_id),
-            .initial_window_size = initial_window_size,
-            .maximum_packet_size = maximum_packet_size,
             .type_specific_data = type_specific_data,
         };
 
@@ -134,9 +126,6 @@ pub const ChannelManager = struct {
         std.log.debug("DEBUG: Creating CHANNEL_OPEN_CONFIRMATION", .{});
         // Send CHANNEL_OPEN_CONFIRMATION
         const confirm_msg = channel_protocol.ChannelOpenConfirmation{
-            .sender_channel = if (stream_id > std.math.maxInt(u32)) return error.StreamIdOverflow else @intCast(stream_id),
-            .initial_window_size = open_msg.initial_window_size,
-            .maximum_packet_size = open_msg.maximum_packet_size,
             .type_specific_data = "",
         };
 

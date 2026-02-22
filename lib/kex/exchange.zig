@@ -174,6 +174,7 @@ pub const ClientKeyExchange = struct {
             init_encoded,
             reply_without_kex,
             server_data.host_key,
+            &self.ephemeral_key.public_key,
             &server_data.public_key,
             &shared_secret,
         );
@@ -345,6 +346,7 @@ pub const ServerKeyExchange = struct {
             init_data,
             reply_without_kex,
             host_key,
+            &client_ephemeral.public_key,
             &server_ephemeral.public_key,
             &shared_secret,
         );

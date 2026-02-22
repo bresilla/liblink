@@ -152,54 +152,58 @@ pub fn calculateSharedSecret(
 
 /// Calculate exchange hash H for curve25519-sha256
 ///
-/// Per SPEC.md Section 3.2:
+/// Per draft-bider-ssh-quic-09 Section 3.2, Figure 9:
 /// H = SHA-256(
-///   string(SSH_QUIC_INIT content)
-///   || string(SSH_QUIC_REPLY content without server-kex-alg-data)
-///   || byte(31)
-///   || string(K_S)
-///   || string(Q_S)
-///   || mpint(K)
+///   byte[8]  "SSH/QUIC"
+///   string   SSH_QUIC_INIT content
+///   string   SSH_QUIC_REPLY content without server-kex-alg-data
+///   byte(31)
+///   string   K_S
+///   string   Q_C
+///   string   Q_S
+///   mpint    K
 /// )
 pub fn calculateExchangeHash(
     allocator: Allocator,
     init_content: []const u8,
     reply_content_without_kex: []const u8,
     host_key: []const u8,
+    client_public_key: *const [32]u8,
     server_public_key: *const [32]u8,
     shared_secret: *const [32]u8,
 ) ![]u8 {
-    // Calculate total size for hash input
     var total_size: usize = 0;
+    total_size += 8; // byte[8] "SSH/QUIC"
     total_size += 4 + init_content.len; // string(init)
     total_size += 4 + reply_content_without_kex.len; // string(reply without kex)
     total_size += 1; // byte(31)
     total_size += 4 + host_key.len; // string(K_S)
+    total_size += 4 + 32; // string(Q_C)
     total_size += 4 + 32; // string(Q_S)
 
-    // Calculate mpint size for K
-    // mpint encoding: 4 bytes length + data
-    // For X25519, K is always 32 bytes positive
-    const k_mpint_size = 4 + 1 + 32; // length + sign byte + 32 bytes
+    // mpint encoding: 4 bytes length + data (+ possible leading 0x00)
+    const k_mpint_size = 4 + 1 + 32;
     total_size += k_mpint_size;
 
-    // Allocate buffer for hash input
     const hash_input = try allocator.alloc(u8, total_size);
     defer allocator.free(hash_input);
 
     var writer = wire.Writer{ .buffer = hash_input };
 
-    // Write all components
+    // "SSH/QUIC" prefix (raw bytes, not a string)
+    @memcpy(hash_input[0..8], "SSH/QUIC");
+    writer.offset = 8;
+
     try writer.writeString(init_content);
     try writer.writeString(reply_content_without_kex);
     try writer.writeByte(constants.SSH_MSG.KEX_ECDH_REPLY);
     try writer.writeString(host_key);
+    try writer.writeString(client_public_key);
     try writer.writeString(server_public_key);
 
     // Write K as mpint (positive, add leading 0x00 byte if high bit is set)
     var k_mpint_buf: [33]u8 = undefined;
     if (shared_secret[0] & 0x80 != 0) {
-        // Add leading zero byte for positive number
         k_mpint_buf[0] = 0x00;
         @memcpy(k_mpint_buf[1..33], shared_secret);
         try writer.writeMpint(&k_mpint_buf);
@@ -207,7 +211,6 @@ pub fn calculateExchangeHash(
         try writer.writeMpint(shared_secret);
     }
 
-    // Calculate SHA-256 hash
     const hash = try allocator.alloc(u8, 32);
     const hash_result = crypto.hash.sha256(hash_input);
     @memcpy(hash, &hash_result);
@@ -310,6 +313,7 @@ test "calculateExchangeHash - basic functionality" {
     const init_content = "init_payload";
     const reply_content = "reply_payload_without_kex";
     const host_key = "host_key_data";
+    const client_pub: [32]u8 = [_]u8{3} ** 32;
     const server_pub: [32]u8 = [_]u8{1} ** 32;
     const shared_secret: [32]u8 = [_]u8{2} ** 32;
 
@@ -318,6 +322,7 @@ test "calculateExchangeHash - basic functionality" {
         init_content,
         reply_content,
         host_key,
+        &client_pub,
         &server_pub,
         &shared_secret,
     );
@@ -344,6 +349,7 @@ test "calculateExchangeHash - deterministic" {
     const init_content = "test_init";
     const reply_content = "test_reply";
     const host_key = "test_host_key";
+    const client_pub: [32]u8 = [_]u8{0x11} ** 32;
     const server_pub: [32]u8 = [_]u8{0x42} ** 32;
     const shared_secret: [32]u8 = [_]u8{0x99} ** 32;
 
@@ -353,6 +359,7 @@ test "calculateExchangeHash - deterministic" {
         init_content,
         reply_content,
         host_key,
+        &client_pub,
         &server_pub,
         &shared_secret,
     );
@@ -363,6 +370,7 @@ test "calculateExchangeHash - deterministic" {
         init_content,
         reply_content,
         host_key,
+        &client_pub,
         &server_pub,
         &shared_secret,
     );
