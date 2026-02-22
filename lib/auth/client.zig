@@ -6,7 +6,6 @@ const crypto = @import("../crypto/crypto.zig");
 /// SSH Authentication Client
 ///
 /// Handles client-side authentication after key exchange is complete.
-/// Supports password and public key authentication methods.
 pub const AuthClient = struct {
     allocator: Allocator,
     username: []const u8,
@@ -20,18 +19,6 @@ pub const AuthClient = struct {
             .username = username,
             .service_name = "ssh-connection",
         };
-    }
-
-    /// Authenticate using password
-    pub fn authenticatePassword(self: *Self, password: []const u8) ![]u8 {
-        const request = userauth.UserauthRequest{
-            .username = self.username,
-            .service_name = self.service_name,
-            .method_name = "password",
-            .method_data = .{ .password = password },
-        };
-
-        return try request.encode(self.allocator);
     }
 
     /// Authenticate using public key
@@ -233,19 +220,6 @@ pub const AuthResult = union(enum) {
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "AuthClient - password authentication" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var client = AuthClient.init(allocator, "testuser");
-
-    const request = try client.authenticatePassword("testpass");
-    defer allocator.free(request);
-
-    // Verify it's a valid SSH_MSG_USERAUTH_REQUEST
-    try testing.expectEqual(@as(u8, 50), request[0]);
-}
 
 test "AuthClient - none authentication" {
     const testing = std.testing;

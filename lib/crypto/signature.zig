@@ -13,10 +13,14 @@ pub const KeyPair = struct {
     ///
     /// Note: For testing only. Use proper key generation in production.
     pub fn generate(random: std.Random) KeyPair {
-        var key_pair: KeyPair = undefined;
-        random.bytes(&key_pair.private_key);
-        random.bytes(&key_pair.public_key);
-        return key_pair;
+        var seed: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &seed);
+        random.bytes(&seed);
+        const kp = Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+        return .{
+            .public_key = kp.public_key.bytes,
+            .private_key = kp.secret_key.bytes,
+        };
     }
 };
 
@@ -83,19 +87,49 @@ test "KeyPair - generate" {
 }
 
 test "signEd25519 and verifyEd25519 - valid signature" {
-    // Skip: KeyPair.generate() doesn't create valid Ed25519 key pairs
-    // Real keys come from keyfile parser
-    return error.SkipZigTest;
+    const testing = std.testing;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const keypair = KeyPair.generate(random);
+
+    const data = "test message";
+    var signature: [64]u8 = undefined;
+    signEd25519(data, &keypair.private_key, &signature);
+
+    try testing.expect(verifyEd25519(data, &signature, &keypair.public_key));
 }
 
 test "verifyEd25519 - invalid signature" {
-    // Skip: KeyPair.generate() doesn't create valid Ed25519 key pairs
-    return error.SkipZigTest;
+    const testing = std.testing;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const keypair = KeyPair.generate(random);
+
+    const data = "test message";
+    var signature: [64]u8 = undefined;
+    signEd25519(data, &keypair.private_key, &signature);
+
+    // Corrupt the signature
+    signature[0] ^= 0xFF;
+    try testing.expect(!verifyEd25519(data, &signature, &keypair.public_key));
 }
 
 test "verifyEd25519 - wrong public key" {
-    // Skip: KeyPair.generate() doesn't create valid Ed25519 key pairs
-    return error.SkipZigTest;
+    const testing = std.testing;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const keypair1 = KeyPair.generate(random);
+    const keypair2 = KeyPair.generate(random);
+
+    const data = "test message";
+    var signature: [64]u8 = undefined;
+    signEd25519(data, &keypair1.private_key, &signature);
+
+    // Verify with wrong public key should fail
+    try testing.expect(!verifyEd25519(data, &signature, &keypair2.public_key));
 }
 
 test "signEd25519 - deterministic" {

@@ -61,29 +61,25 @@ pub fn parsePrivateKey(allocator: Allocator, content: []const u8) !ParsedKey {
 
     const base64_data = content[data_start + openssh_header.len .. data_end];
 
-    // Decode base64
-    var decoded = std.ArrayListUnmanaged(u8){};
-    defer decoded.deinit(allocator);
+    // Strip whitespace/newlines and decode base64 as a single block
+    var stripped = std.ArrayListUnmanaged(u8){};
+    defer stripped.deinit(allocator);
+
+    for (base64_data) |ch| {
+        if (ch != '\n' and ch != '\r' and ch != ' ' and ch != '\t') {
+            try stripped.append(allocator, ch);
+        }
+    }
 
     const decoder = std.base64.standard.Decoder;
-    var line_start: usize = 0;
+    const decoded_len = try decoder.calcSizeForSlice(stripped.items);
+    var decoded_buf = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(decoded_buf);
+    try decoder.decode(decoded_buf, stripped.items);
 
-    while (line_start < base64_data.len) {
-        // Find line end
-        const line_end = std.mem.indexOfScalarPos(u8, base64_data, line_start, '\n') orelse base64_data.len;
-        const line = std.mem.trim(u8, base64_data[line_start..line_end], &std.ascii.whitespace);
-
-        if (line.len > 0) {
-            var line_decoded: [4096]u8 = undefined;
-            const decoded_len = try decoder.calcSizeForSlice(line);
-            if (decoded_len > line_decoded.len) return error.KeyTooLarge;
-
-            try decoder.decode(&line_decoded, line);
-            try decoded.appendSlice(allocator, line_decoded[0..decoded_len]);
-        }
-
-        line_start = line_end + 1;
-    }
+    var decoded = std.ArrayListUnmanaged(u8){};
+    defer decoded.deinit(allocator);
+    try decoded.appendSlice(allocator, decoded_buf[0..decoded_len]);
 
     // Parse the OpenSSH key format
     return try parseOpenSSHKeyBlob(allocator, decoded.items);

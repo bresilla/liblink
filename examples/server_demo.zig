@@ -1,5 +1,5 @@
 const std = @import("std");
-const syslink = @import("syslink");
+const liblink = @import("liblink");
 
 /// Complete SSH/QUIC Server Demo
 ///
@@ -36,13 +36,13 @@ pub fn main() !void {
     std.debug.print("Server configuration:\n", .{});
     std.debug.print("  Address: {s}:{d}\n", .{ listen_addr, listen_port });
     std.debug.print("  Protocol: SSH/QUIC\n", .{});
-    std.debug.print("  Auth methods: password, publickey\n\n", .{});
+    std.debug.print("  Auth methods: publickey\n\n", .{});
 
     // Start server listener
     std.debug.print("Starting server listener...\n", .{});
 
     const host_key_str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."; // Placeholder
-    var listener = syslink.connection.startServer(
+    var listener = liblink.connection.startServer(
         allocator,
         listen_addr,
         listen_port,
@@ -108,8 +108,8 @@ pub fn main() !void {
 
 fn handleClient(
     allocator: std.mem.Allocator,
-    connection: *syslink.connection.ServerConnection,
-    listener: *syslink.connection.ConnectionListener,
+    connection: *liblink.connection.ServerConnection,
+    listener: *liblink.connection.ConnectionListener,
 ) !void {
     // Ensure connection is cleaned up when this function returns
     defer listener.removeConnection(connection);
@@ -117,7 +117,6 @@ fn handleClient(
     std.debug.print("Waiting for authentication...\n", .{});
 
     const auth_success = connection.handleAuthentication(
-        validatePassword,
         validatePublicKey,
     ) catch |err| {
         std.debug.print("✗ Authentication error: {}\n", .{err});
@@ -174,19 +173,6 @@ fn handleClient(
 
 // === Authentication Validators ===
 
-fn validatePassword(username: []const u8, password: []const u8) bool {
-    std.debug.print("  Password auth: user={s}\n", .{username});
-
-    // Demo: Accept testuser/testpass
-    if (std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass")) {
-        std.debug.print("  ✓ Password accepted\n", .{});
-        return true;
-    }
-
-    std.debug.print("  ✗ Password rejected\n", .{});
-    return false;
-}
-
 fn validatePublicKey(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     std.debug.print("  Public key auth: user={s}, algo={s}\n", .{ username, algorithm });
 
@@ -239,7 +225,7 @@ fn handleSubsystemRequest(stream_id: u64, subsystem_name: []const u8) !void {
         std.debug.print("  ✓ SFTP subsystem handler called\n", .{});
         std.debug.print("  Note: SFTP server can be started here\n", .{});
         std.debug.print("  Example:\n", .{});
-        std.debug.print("    var sftp_server = try syslink.sftp.SftpServer.init(allocator, sftp_channel);\n", .{});
+        std.debug.print("    var sftp_server = try liblink.sftp.SftpServer.init(allocator, sftp_channel);\n", .{});
         std.debug.print("    defer sftp_server.deinit();\n", .{});
         std.debug.print("    try sftp_server.run(); // Process SFTP requests\n", .{});
     } else {

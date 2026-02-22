@@ -7,6 +7,7 @@ const kex_exchange = @import("kex/exchange.zig");
 const udp = @import("network/udp.zig");
 const constants = @import("common/constants.zig");
 const auth = @import("auth/auth.zig");
+const known_hosts = @import("auth/known_hosts.zig");
 const channels = @import("channels/channels.zig");
 const sftp = @import("sftp/sftp.zig");
 
@@ -35,6 +36,11 @@ pub const ConnectionConfig = struct {
 
     /// Random number generator
     random: std.Random,
+};
+
+pub const HostKeyTrustPolicy = enum {
+    strict,
+    accept_new,
 };
 
 /// Server configuration for accepting connections
@@ -90,7 +96,7 @@ pub const ClientConnection = struct {
         // NOTE: Don't deinit udp_transport - we'll pass its socket to QUIC
 
         // Initialize key exchange
-        var kex = kex_exchange.ClientKeyExchange.init(allocator, config.random);
+        var kex = try kex_exchange.ClientKeyExchange.init(allocator, config.random);
         errdefer kex.deinit();
 
         // Create SSH_QUIC_INIT message
@@ -178,46 +184,6 @@ pub const ClientConnection = struct {
     /// Receive data from a channel
     pub fn receiveData(self: *Self, channel_id: u64, buffer: []u8) !usize {
         return self.transport.receiveFromStream(channel_id, buffer);
-    }
-
-    /// Authenticate with password
-    ///
-    /// Uses stream 0 for authentication protocol.
-    /// Returns true on success, false on failure.
-    pub fn authenticatePassword(self: *Self, username: []const u8, password: []const u8) !bool {
-        var auth_client = auth.AuthClient.init(self.allocator, username);
-
-        // Create authentication request
-        const request_data = try auth_client.authenticatePassword(password);
-        defer self.allocator.free(request_data);
-
-        try self.ensureAuthStreamOpen();
-
-        // Send on stream 0 (authentication stream)
-        try self.transport.sendOnStream(0, request_data);
-
-        while (true) {
-            var result = try self.receiveAuthResult(&auth_client);
-            switch (result) {
-                .success => {
-                    result.deinit(self.allocator);
-                    return true;
-                },
-                .failure => {
-                    result.deinit(self.allocator);
-                    return false;
-                },
-                .pk_ok => {
-                    result.deinit(self.allocator);
-                    continue;
-                },
-                .banner => |b| {
-                    std.log.info("Server banner: {s}", .{b.message});
-                    result.deinit(self.allocator);
-                    continue;
-                },
-            }
-        }
     }
 
     /// Authenticate with public key
@@ -341,12 +307,15 @@ pub const ClientConnection = struct {
         }
     }
 
+    /// Returns the server host key fingerprint observed during KEX.
+    pub fn getServerHostKeyFingerprint(self: *const Self) []const u8 {
+        return self.kex.getServerHostKeyFingerprint();
+    }
+
     fn ensureAuthStreamOpen(self: *Self) !void {
-        _ = self.transport.openStream() catch |err| blk: {
-            // Stream might already exist, that's fine for stream 0 auth flow.
-            std.log.debug("Stream 0 open result: {}", .{err});
-            break :blk 0;
-        };
+        // Stream 0 is pre-created in QUIC connection init for auth.
+        // No need to open a new stream — that would waste a stream ID.
+        _ = self;
     }
 
     fn receiveAuthResult(self: *Self, auth_client: *auth.AuthClient) !auth.AuthResult {
@@ -490,15 +459,11 @@ pub const ServerConnection = struct {
     ///
     /// Receives authentication request on stream 0, validates credentials,
     /// and sends response. Returns true if authentication succeeds.
-    ///
-    /// Use setPasswordValidator() and setPublicKeyValidator() to provide
-    /// credential validation callbacks.
     pub fn handleAuthentication(
         self: *Self,
-        password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !bool {
-        const identity = try self.handleAuthenticationIdentity(password_validator, publickey_validator);
+        const identity = try self.handleAuthenticationIdentity(publickey_validator);
         if (identity) |user| {
             self.allocator.free(user);
             return true;
@@ -510,16 +475,11 @@ pub const ServerConnection = struct {
     /// Caller owns returned memory when non-null.
     pub fn handleAuthenticationIdentity(
         self: *Self,
-        password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !?[]u8 {
         std.log.info("Waiting for authentication request...", .{});
 
         var auth_server = auth.AuthServer.init(self.allocator);
-        if (password_validator) |validator| {
-            auth_server.setPasswordValidator(validator);
-            std.log.debug("Password authentication enabled", .{});
-        }
         if (publickey_validator) |validator| {
             auth_server.setPublicKeyValidator(validator);
             std.log.debug("Public key authentication enabled", .{});
@@ -806,6 +766,49 @@ pub fn connectClient(
     return ClientConnection.connect(allocator, config);
 }
 
+/// Create a client connection with known-hosts trust policy.
+pub fn connectClientTrusted(
+    allocator: Allocator,
+    server_address: []const u8,
+    server_port: u16,
+    random: std.Random,
+    policy: HostKeyTrustPolicy,
+) !ClientConnection {
+    const host_key = try known_hosts.hostKeyForEndpoint(allocator, server_address, server_port);
+    defer allocator.free(host_key);
+
+    const trusted_owned = try known_hosts.loadFingerprintsForHost(allocator, host_key);
+    defer known_hosts.freeFingerprints(allocator, trusted_owned);
+
+    if (policy == .strict and trusted_owned.len == 0) {
+        return error.UnknownHostKey;
+    }
+
+    const trusted = try allocator.alloc([]const u8, trusted_owned.len);
+    defer allocator.free(trusted);
+    for (trusted_owned, 0..) |fp, idx| {
+        trusted[idx] = fp;
+    }
+
+    const config = ConnectionConfig{
+        .server_address = server_address,
+        .server_port = server_port,
+        .trusted_host_fingerprints = trusted,
+        .random = random,
+    };
+
+    var conn = try ClientConnection.connect(allocator, config);
+
+    if (policy == .accept_new and trusted_owned.len == 0) {
+        const observed = conn.getServerHostKeyFingerprint();
+        if (observed.len > 0) {
+            try known_hosts.addFingerprint(allocator, host_key, observed);
+        }
+    }
+
+    return conn;
+}
+
 /// Start a simple server listener (convenience wrapper)
 pub fn startServer(
     allocator: Allocator,
@@ -865,12 +868,6 @@ test "ServerConfig - initialization" {
     try testing.expectEqualStrings("0.0.0.0", config.listen_address);
 }
 
-// Test helper: password validator
-fn testPasswordValidator(username: []const u8, password: []const u8) bool {
-    std.log.info("Password validation: user={s}, password={s}", .{ username, password });
-    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass123");
-}
-
 // Test helper: public key validator
 fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     _ = public_key_blob;
@@ -881,74 +878,11 @@ fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_ke
 test "ServerConnection - authentication validators" {
     const testing = std.testing;
 
-    // Test password validator
-    try testing.expect(testPasswordValidator("testuser", "testpass123"));
-    try testing.expect(!testPasswordValidator("testuser", "wrongpass"));
-    try testing.expect(!testPasswordValidator("wronguser", "testpass123"));
-
     // Test public key validator
     const dummy_key = "dummy-key";
     try testing.expect(testPublicKeyValidator("keyuser", "ssh-ed25519", dummy_key));
     try testing.expect(!testPublicKeyValidator("keyuser", "ssh-rsa", dummy_key));
     try testing.expect(!testPublicKeyValidator("wronguser", "ssh-ed25519", dummy_key));
-}
-
-test "AuthServer integration - password authentication flow" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    // Create auth server
-    var auth_server = auth.AuthServer.init(allocator);
-    auth_server.setPasswordValidator(testPasswordValidator);
-
-    // Create password authentication request
-    var request = @import("protocol/userauth.zig").UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "testpass123" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "test-exchange-hash";
-
-    // Process request
-    var response = try auth_server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    // Verify success
-    try testing.expect(response.success);
-}
-
-test "AuthServer integration - password authentication failure" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    // Create auth server
-    var auth_server = auth.AuthServer.init(allocator);
-    auth_server.setPasswordValidator(testPasswordValidator);
-
-    // Create password authentication request with wrong password
-    var request = @import("protocol/userauth.zig").UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "wrongpass" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "test-exchange-hash";
-
-    // Process request
-    var response = try auth_server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    // Verify failure
-    try testing.expect(!response.success);
 }
 
 test "ConnectionListener - init and shutdown" {

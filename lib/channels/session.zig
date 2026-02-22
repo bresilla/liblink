@@ -39,31 +39,39 @@ pub const SessionChannel = struct {
     ///
     /// Reads the CHANNEL_OPEN_CONFIRMATION message.
     pub fn waitForConfirmation(self: *Self) !void {
-        // Poll to receive the confirmation packet
-        try self.manager.transport.poll(30000); // 30 second timeout
-
         var buffer: [4096]u8 = undefined;
-        const len = try self.manager.transport.receiveFromStream(self.stream_id, &buffer);
-        const data = buffer[0..len];
 
-        if (data.len < 1) {
-            return error.InvalidResponse;
+        // Poll multiple times until we receive the confirmation
+        var attempts: u32 = 0;
+        while (attempts < 300) : (attempts += 1) {
+            // Poll to receive packets
+            self.manager.transport.poll(100) catch {}; // 100ms timeout
+
+            // Try to read from stream
+            const len = self.manager.transport.receiveFromStream(self.stream_id, &buffer) catch 0;
+
+            if (len > 0) {
+                const data = buffer[0..len];
+                const msg_type = data[0];
+
+                switch (msg_type) {
+                    91 => { // SSH_MSG_CHANNEL_OPEN_CONFIRMATION
+                        try self.manager.handleOpenConfirmation(self.stream_id, data);
+                        return;
+                    },
+                    92 => { // SSH_MSG_CHANNEL_OPEN_FAILURE
+                        try self.manager.handleOpenFailure(self.stream_id, data);
+                        return error.ChannelOpenFailed;
+                    },
+                    else => {
+                        std.log.err("Unexpected message type: {}", .{msg_type});
+                        return error.UnexpectedMessageType;
+                    },
+                }
+            }
         }
 
-        const msg_type = data[0];
-        switch (msg_type) {
-            91 => { // SSH_MSG_CHANNEL_OPEN_CONFIRMATION
-                try self.manager.handleOpenConfirmation(self.stream_id, data);
-            },
-            92 => { // SSH_MSG_CHANNEL_OPEN_FAILURE
-                try self.manager.handleOpenFailure(self.stream_id, data);
-                return error.ChannelOpenFailed;
-            },
-            else => {
-                std.log.err("Unexpected message type: {}", .{msg_type});
-                return error.UnexpectedMessageType;
-            },
-        }
+        return error.InvalidResponse; // Timeout after 30 seconds
     }
 
     /// Request a pseudo-terminal

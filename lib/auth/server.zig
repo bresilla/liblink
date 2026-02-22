@@ -10,14 +10,11 @@ const crypto = @import("../crypto/crypto.zig");
 pub const AuthServer = struct {
     allocator: Allocator,
     service_name: []const u8,
-    password_validator: ?PasswordValidator,
     publickey_validator: ?PublicKeyValidator,
+    failed_attempts: u32 = 0,
+    max_auth_attempts: u32 = 6,
 
     const Self = @This();
-
-    /// Password validation callback
-    /// Returns true if credentials are valid
-    pub const PasswordValidator = *const fn (username: []const u8, password: []const u8) bool;
 
     /// Public key validation callback
     /// Returns true if the public key is authorized for this user
@@ -27,14 +24,8 @@ pub const AuthServer = struct {
         return Self{
             .allocator = allocator,
             .service_name = "ssh-connection",
-            .password_validator = null,
             .publickey_validator = null,
         };
-    }
-
-    /// Set password validator callback
-    pub fn setPasswordValidator(self: *Self, validator: PasswordValidator) void {
-        self.password_validator = validator;
     }
 
     /// Set public key validator callback
@@ -48,42 +39,40 @@ pub const AuthServer = struct {
         request_data: []const u8,
         exchange_hash: []const u8,
     ) !AuthResponse {
+        if (self.failed_attempts >= self.max_auth_attempts) {
+            return error.TooManyAuthAttempts;
+        }
+
         var request = try userauth.UserauthRequest.decode(self.allocator, request_data);
         defer request.deinit(self.allocator);
 
         // Verify service name
         if (!std.mem.eql(u8, request.service_name, self.service_name)) {
+            self.failed_attempts += 1;
             return self.createFailure(&[_][]const u8{}, false);
         }
 
         // Handle authentication methods
         if (std.mem.eql(u8, request.method_name, "none")) {
             // "none" method - return available methods
-            return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
-        } else if (std.mem.eql(u8, request.method_name, "password")) {
-            return try self.handlePasswordAuth(request.username, request.method_data.password);
+            return self.createFailure(&[_][]const u8{"publickey"}, false);
         } else if (std.mem.eql(u8, request.method_name, "publickey")) {
-            return try self.handlePublicKeyAuth(
+            const response = try self.handlePublicKeyAuth(
                 request.username,
                 request.method_data.publickey,
                 exchange_hash,
                 request_data,
             );
+            if (!response.success and response.data.len > 0 and response.data[0] != 60) {
+                // Count failures (but not PK_OK queries which have type 60)
+                self.failed_attempts += 1;
+            }
+            return response;
         } else {
             // Unknown method
-            return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
+            self.failed_attempts += 1;
+            return self.createFailure(&[_][]const u8{"publickey"}, false);
         }
-    }
-
-    /// Handle password authentication
-    fn handlePasswordAuth(self: *Self, username: []const u8, password: []const u8) !AuthResponse {
-        if (self.password_validator) |validator| {
-            if (validator(username, password)) {
-                return self.createSuccess(username);
-            }
-        }
-
-        return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
     }
 
     /// Handle public key authentication
@@ -101,7 +90,7 @@ pub const AuthServer = struct {
             false;
 
         if (!is_authorized) {
-            return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
+            return self.createFailure(&[_][]const u8{"publickey"}, false);
         }
 
         // If no signature provided, this is a query - respond with success indicator
@@ -123,7 +112,7 @@ pub const AuthServer = struct {
 
         // Verify algorithm matches
         if (!std.mem.eql(u8, sig_algorithm, pk_data.algorithm_name)) {
-            return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
+            return self.createFailure(&[_][]const u8{"publickey"}, false);
         }
 
         // Build signature data to verify
@@ -168,7 +157,7 @@ pub const AuthServer = struct {
         if (valid) {
             return self.createSuccess(username);
         } else {
-            return self.createFailure(&[_][]const u8{ "password", "publickey" }, false);
+            return self.createFailure(&[_][]const u8{"publickey"}, false);
         }
     }
 
@@ -330,65 +319,9 @@ pub const AuthResponse = struct {
 // Tests
 // ============================================================================
 
-fn testPasswordValidator(username: []const u8, password: []const u8) bool {
-    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass");
-}
-
 fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     _ = public_key_blob;
     return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, algorithm, "ssh-ed25519");
-}
-
-test "AuthServer - password authentication success" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var server = AuthServer.init(allocator);
-    server.setPasswordValidator(testPasswordValidator);
-
-    // Create password request
-    var request = userauth.UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "testpass" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "dummy_hash";
-
-    var response = try server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    try testing.expect(response.success);
-}
-
-test "AuthServer - password authentication failure" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var server = AuthServer.init(allocator);
-    server.setPasswordValidator(testPasswordValidator);
-
-    // Create password request with wrong password
-    var request = userauth.UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "wrongpass" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "dummy_hash";
-
-    var response = try server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    try testing.expect(!response.success);
 }
 
 test "AuthServer - none method returns available methods" {
@@ -418,7 +351,7 @@ test "AuthServer - none method returns available methods" {
     var failure = try userauth.UserauthFailure.decode(allocator, response.data);
     defer failure.deinit(allocator);
 
-    try testing.expectEqual(@as(usize, 2), failure.authentications_continue.len);
+    try testing.expectEqual(@as(usize, 1), failure.authentications_continue.len);
 }
 
 test "AuthServer - public key query returns pk_ok" {

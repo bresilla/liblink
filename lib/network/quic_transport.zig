@@ -1,12 +1,12 @@
 const std = @import("std");
-const runquic_transport = @import("runquic_transport");
+const libfast_transport = @import("libfast_transport");
 
-/// SysLink adapter around runquic transport implementation.
+/// LibLink adapter around libfast transport implementation.
 ///
 /// Keeps third-party transport API coupling isolated to one file so upstream
-/// runquic changes only require updates here.
+/// libfast changes only require updates here.
 pub const QuicTransport = struct {
-    inner: runquic_transport.QuicTransport,
+    inner: libfast_transport.QuicTransport,
 
     const Self = @This();
 
@@ -21,7 +21,7 @@ pub const QuicTransport = struct {
         peer_addr: std.posix.sockaddr.storage,
     ) !Self {
         return Self{
-            .inner = try runquic_transport.QuicTransport.init(
+            .inner = try libfast_transport.QuicTransport.init(
                 allocator,
                 socket,
                 local_conn_id,
@@ -60,8 +60,8 @@ pub const QuicTransport = struct {
 };
 
 comptime {
-    const T = runquic_transport.QuicTransport;
+    const T = libfast_transport.QuicTransport;
     if (!@hasDecl(T, "init") or !@hasDecl(T, "openStream") or !@hasDecl(T, "closeStream") or !@hasDecl(T, "sendOnStream") or !@hasDecl(T, "receiveFromStream") or !@hasDecl(T, "poll") or !@hasDecl(T, "deinit")) {
-        @compileError("runquic_transport.QuicTransport no longer matches SysLink adapter expectations");
+        @compileError("libfast_transport.QuicTransport no longer matches LibLink adapter expectations");
     }
 }

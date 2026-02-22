@@ -216,6 +216,7 @@ pub const Writer = struct {
 
     /// Write string (uint32 length prefix + data)
     pub fn writeString(self: *Writer, data: []const u8) WireError!void {
+        if (data.len > std.math.maxInt(u32)) return error.OutOfRange;
         try self.writeUint32(@intCast(data.len));
         try self.writeBytes(data);
     }
@@ -259,6 +260,7 @@ pub const Writer = struct {
         const trimmed = data[start..];
         const len = if (need_padding) trimmed.len + 1 else trimmed.len;
 
+        if (len > std.math.maxInt(u32)) return error.OutOfRange;
         try self.writeUint32(@intCast(len));
         if (need_padding) {
             try self.writeByte(0x00);

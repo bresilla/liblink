@@ -19,47 +19,47 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const runquic_dep = b.dependency("runquic", .{
+    const libfast_dep = b.dependency("libfast", .{
         .target = target,
         .optimize = optimize,
     });
-    const runquic_module = runquic_dep.module("runquic");
-    const runquic_transport_module = b.createModule(.{
-        .root_source_file = runquic_dep.path("lib/transport.zig"),
+    const libfast_module = libfast_dep.module("libfast");
+    const libfast_transport_module = b.createModule(.{
+        .root_source_file = libfast_dep.path("lib/transport.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
-    const syslink_module = b.createModule(.{
-        .root_source_file = b.path("lib/syslink.zig"),
+    const liblink_module = b.createModule(.{
+        .root_source_file = b.path("lib/liblink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    syslink_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    syslink_module.addImport("runquic", runquic_module);
-    syslink_module.addImport("runquic_transport", runquic_transport_module);
+    liblink_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    liblink_module.addImport("libfast", libfast_module);
+    liblink_module.addImport("libfast_transport", libfast_transport_module);
 
-    const syslink_export = b.addModule("syslink", .{
-        .root_source_file = b.path("lib/syslink.zig"),
+    const liblink_export = b.addModule("liblink", .{
+        .root_source_file = b.path("lib/liblink.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    syslink_export.addImport("runquic", runquic_module);
-    syslink_export.addImport("runquic_transport", runquic_transport_module);
+    liblink_export.addImport("libfast", libfast_module);
+    liblink_export.addImport("libfast_transport", libfast_transport_module);
 
     const lib = b.addLibrary(.{
-        .name = "syslink",
-        .root_module = syslink_module,
+        .name = "liblink",
+        .root_module = liblink_module,
         .linkage = .static,
     });
 
     b.installArtifact(lib);
 
     const exe_unit_tests = b.addTest(.{
-        .root_module = syslink_module,
+        .root_module = liblink_module,
     });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
@@ -76,7 +76,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_client_module.addImport("syslink", syslink_module);
+    ex_client_module.addImport("liblink", liblink_module);
 
     const ex_client = b.addExecutable(.{
         .name = "client_demo",
@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    ex_server_module.addImport("syslink", syslink_module);
+    ex_server_module.addImport("liblink", liblink_module);
 
     const ex_server = b.addExecutable(.{
         .name = "server_demo",
@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
-    sl_module.addImport("syslink", syslink_module);
+    sl_module.addImport("liblink", liblink_module);
 
     const sl_unit_tests = b.addTest(.{
         .root_module = sl_module,

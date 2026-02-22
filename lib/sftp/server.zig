@@ -234,8 +234,7 @@ pub const SftpServer = struct {
 
             const resolved_path = self.resolveClientPath(path) catch |err| {
                 const status_code = statusFromError(err);
-                const msg = @errorName(err);
-                try self.sendStatus(request_id, status_code, msg, "");
+                try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
                 return;
             };
             defer self.allocator.free(resolved_path);
@@ -269,8 +268,7 @@ pub const SftpServer = struct {
                 .file => |*f| {
                     f.file.sync() catch |err| {
                         const status_code = statusFromError(err);
-                        const msg = @errorName(err);
-                        try self.sendStatus(request_id, status_code, msg, "");
+                        try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
                         return;
                     };
                 },
@@ -350,8 +348,7 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(filename) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
@@ -359,8 +356,7 @@ pub const SftpServer = struct {
         // Open the file
         const handle_id = self.openFile(resolved_path, flags) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -406,7 +402,8 @@ pub const SftpServer = struct {
         const handle_str = try reader.readString(self.allocator);
         defer self.allocator.free(handle_str);
         const offset = try reader.readUint64();
-        const len = try reader.readUint32();
+        const raw_len = try reader.readUint32();
+        const len: u32 = @min(raw_len, 64 * 1024); // Cap at 64KB per read
 
         const handle_id = try self.handleStringToId(handle_str);
 
@@ -425,8 +422,7 @@ pub const SftpServer = struct {
         // Read from file
         const data = handle.file.readAt(self.allocator, offset, len) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(data);
@@ -469,8 +465,7 @@ pub const SftpServer = struct {
         // Write to file
         handle.file.writeAt(offset, data) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -489,8 +484,7 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
@@ -498,8 +492,7 @@ pub const SftpServer = struct {
         // Open directory
         const handle_id = self.openDirectory(resolved_path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -546,8 +539,7 @@ pub const SftpServer = struct {
                 return;
             }
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer {
@@ -574,16 +566,14 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
 
         const attrs = self.getFileAttributes(resolved_path, true) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -602,8 +592,7 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
@@ -611,8 +600,7 @@ pub const SftpServer = struct {
         // LSTAT doesn't follow symlinks
         const attrs = self.getFileAttributes(resolved_path, false) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -656,16 +644,14 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
 
         std.fs.cwd().makeDir(resolved_path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -684,16 +670,14 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
 
         std.fs.cwd().deleteDir(resolved_path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -710,18 +694,16 @@ pub const SftpServer = struct {
 
         std.log.info("SFTP REMOVE: path={s}", .{filename});
 
-        const resolved_path = self.resolveClientPath(filename) catch |err| {
+        const resolved_path = self.resolveClientPathNoFollow(filename) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
 
         std.fs.cwd().deleteFile(resolved_path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -740,8 +722,7 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
@@ -785,24 +766,21 @@ pub const SftpServer = struct {
 
         const resolved_old = self.resolveClientPath(oldpath) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_old);
 
         const resolved_new = self.resolveClientPath(newpath) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_new);
 
         std.fs.cwd().rename(resolved_old, resolved_new) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -821,22 +799,19 @@ pub const SftpServer = struct {
 
         const resolved_path = self.resolveClientPath(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
 
-        const attrs = attributes.FileAttributes.decode(reader.buffer[reader.offset..]) catch |err| {
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, msg, "");
+        const attrs = attributes.FileAttributes.decode(reader.buffer[reader.offset..]) catch {
+            try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, statusMessage(.SSH_FX_BAD_MESSAGE), "");
             return;
         };
 
         self.applyPathAttributes(resolved_path, attrs) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -851,10 +826,9 @@ pub const SftpServer = struct {
         const path = try reader.readString(self.allocator);
         defer self.allocator.free(path);
 
-        const resolved_path = self.resolveClientPath(path) catch |err| {
+        const resolved_path = self.resolveClientPathNoFollow(path) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_path);
@@ -871,9 +845,11 @@ pub const SftpServer = struct {
 
         const raw_target = link_buf[0..@intCast(target_len)];
         const target_path = if (std.fs.path.isAbsolute(raw_target)) blk: {
-            const maybe_virtual = self.toVirtualPath(raw_target) catch null;
-            if (maybe_virtual) |v| break :blk v;
-            break :blk try self.allocator.dupe(u8, raw_target);
+            const maybe_virtual = self.toVirtualPath(raw_target) catch {
+                try self.sendStatus(request_id, .SSH_FX_PERMISSION_DENIED, "AccessDenied", "");
+                return;
+            };
+            break :blk maybe_virtual;
         } else try self.allocator.dupe(u8, raw_target);
         defer self.allocator.free(target_path);
 
@@ -899,16 +875,14 @@ pub const SftpServer = struct {
 
         const resolved_link = self.resolveClientPath(linkpath) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_link);
 
         const resolved_target = self.resolveClientPath(targetpath) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
         defer self.allocator.free(resolved_target);
@@ -943,9 +917,8 @@ pub const SftpServer = struct {
             return;
         }
 
-        const attrs = attributes.FileAttributes.decode(reader.buffer[reader.offset..]) catch |err| {
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, msg, "");
+        const attrs = attributes.FileAttributes.decode(reader.buffer[reader.offset..]) catch {
+            try self.sendStatus(request_id, .SSH_FX_BAD_MESSAGE, statusMessage(.SSH_FX_BAD_MESSAGE), "");
             return;
         };
 
@@ -956,8 +929,7 @@ pub const SftpServer = struct {
 
         self.applyHandleAttributes(handle, attrs) catch |err| {
             const status_code = statusFromError(err);
-            const msg = @errorName(err);
-            try self.sendStatus(request_id, status_code, msg, "");
+            try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
         };
 
@@ -981,6 +953,8 @@ pub const SftpServer = struct {
         return trimmed;
     }
 
+    const max_path_depth = 256;
+
     fn resolveClientPath(self: *SftpServer, client_path: []const u8) ![]u8 {
         var parts = std.ArrayListUnmanaged([]const u8){};
         defer parts.deinit(self.allocator);
@@ -994,6 +968,7 @@ pub const SftpServer = struct {
                 continue;
             }
             try parts.append(self.allocator, segment);
+            if (parts.items.len > max_path_depth) return error.AccessDenied;
         }
 
         var out = std.ArrayListUnmanaged(u8){};
@@ -1025,10 +1000,58 @@ pub const SftpServer = struct {
         };
 
         if (canonical) |resolved| {
-            defer self.allocator.free(resolved);
             const v = try self.toVirtualPath(resolved);
             self.allocator.free(v);
+            // Return the canonical (resolved) path to prevent TOCTOU races
+            out.deinit(self.allocator);
+            return resolved;
         }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    /// Like resolveClientPath but validates the parent directory instead of
+    /// following symlinks on the final component.  Used by remove/unlink so
+    /// that deleting a symlink removes the link itself rather than its target.
+    fn resolveClientPathNoFollow(self: *SftpServer, client_path: []const u8) ![]u8 {
+        var parts = std.ArrayListUnmanaged([]const u8){};
+        defer parts.deinit(self.allocator);
+
+        var it = std.mem.splitScalar(u8, client_path, '/');
+        while (it.next()) |segment| {
+            if (segment.len == 0 or std.mem.eql(u8, segment, ".")) continue;
+            if (std.mem.eql(u8, segment, "..")) {
+                if (parts.items.len == 0) return error.AccessDenied;
+                _ = parts.pop();
+                continue;
+            }
+            try parts.append(self.allocator, segment);
+            if (parts.items.len > max_path_depth) return error.AccessDenied;
+        }
+
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+
+        try out.appendSlice(self.allocator, self.remote_root);
+        for (parts.items) |part| {
+            if (out.items.len == 0 or out.items[out.items.len - 1] != '/') {
+                try out.append(self.allocator, '/');
+            }
+            try out.appendSlice(self.allocator, part);
+        }
+
+        if (out.items.len == 0) {
+            try out.append(self.allocator, '/');
+        }
+
+        // Validate parent directory is within root
+        const candidate = out.items;
+        const parent = std.fs.path.dirname(candidate) orelse self.remote_root;
+        const parent_real = try std.fs.cwd().realpathAlloc(self.allocator, parent);
+        defer self.allocator.free(parent_real);
+
+        const v = try self.toVirtualPath(parent_real);
+        self.allocator.free(v);
 
         return out.toOwnedSlice(self.allocator);
     }
@@ -1057,7 +1080,10 @@ pub const SftpServer = struct {
         return std.fmt.allocPrint(self.allocator, "/{s}", .{suffix});
     }
 
+    const max_open_handles = 256;
+
     fn openFile(self: *SftpServer, path: []const u8, flags: protocol.OpenFlags) !u64 {
+        if (self.open_handles.count() >= max_open_handles) return error.ProcessFdQuotaExceeded;
         const handle_id = self.next_handle_id;
         self.next_handle_id += 1;
 
@@ -1068,6 +1094,7 @@ pub const SftpServer = struct {
     }
 
     fn openDirectory(self: *SftpServer, path: []const u8) !u64 {
+        if (self.open_handles.count() >= max_open_handles) return error.ProcessFdQuotaExceeded;
         const handle_id = self.next_handle_id;
         self.next_handle_id += 1;
 
@@ -1423,6 +1450,19 @@ const DirEntry = struct {
 // Error Mapping
 // ============================================================================
 
+fn statusMessage(status_code: protocol.StatusCode) []const u8 {
+    return switch (status_code) {
+        .SSH_FX_OK => "Success",
+        .SSH_FX_EOF => "End of file",
+        .SSH_FX_NO_SUCH_FILE => "No such file or directory",
+        .SSH_FX_PERMISSION_DENIED => "Permission denied",
+        .SSH_FX_BAD_MESSAGE => "Bad message",
+        .SSH_FX_OP_UNSUPPORTED => "Operation not supported",
+        .SSH_FX_FAILURE => "Failure",
+        else => "Failure",
+    };
+}
+
 fn statusFromError(err: anyerror) protocol.StatusCode {
     return switch (err) {
         error.FileNotFound,
@@ -1515,7 +1555,7 @@ test "SftpServer - applyPathAttributes updates file size" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 
@@ -1581,7 +1621,7 @@ test "SftpServer - open/write/read flow" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-flow-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-flow-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 
@@ -1624,7 +1664,7 @@ test "SftpServer - stat and lstat differ on symlink" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-link-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-link-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 

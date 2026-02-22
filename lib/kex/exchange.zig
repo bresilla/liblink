@@ -32,14 +32,15 @@ pub const ClientKeyExchange = struct {
     init_message: ?kex_init.SshQuicInit,
     init_message_encoded: ?[]u8, // Save original encoded bytes for exchange hash
     reply_message: ?kex_reply.SshQuicReply,
+    server_host_key_fingerprint: ?[]u8,
     shared_secret: ?[32]u8,
     exchange_hash: ?[]u8,
 
     const Self = @This();
 
     /// Initialize client key exchange
-    pub fn init(allocator: Allocator, random: std.Random) Self {
-        const ephemeral_key = kex_curve25519.ClientEphemeralKey.generate(random);
+    pub fn init(allocator: Allocator, random: std.Random) !Self {
+        const ephemeral_key = try kex_curve25519.ClientEphemeralKey.generate(random);
 
         return Self{
             .allocator = allocator,
@@ -48,12 +49,17 @@ pub const ClientKeyExchange = struct {
             .init_message = null,
             .init_message_encoded = null,
             .reply_message = null,
+            .server_host_key_fingerprint = null,
             .shared_secret = null,
             .exchange_hash = null,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.shared_secret) |*secret| {
+            std.crypto.secureZero(u8, secret);
+        }
+        std.crypto.secureZero(u8, &self.ephemeral_key.private_key);
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -62,6 +68,9 @@ pub const ClientKeyExchange = struct {
         }
         if (self.reply_message) |*msg| {
             msg.deinit(self.allocator);
+        }
+        if (self.server_host_key_fingerprint) |fp| {
+            self.allocator.free(fp);
         }
         if (self.exchange_hash) |hash| {
             self.allocator.free(hash);
@@ -85,9 +94,13 @@ pub const ClientKeyExchange = struct {
         const client_kex_data = try self.ephemeral_key.encodeClientData(self.allocator);
         defer self.allocator.free(client_kex_data);
 
+        // Generate client connection ID (QUIC requires both sides have one)
+        const client_conn_id = try generateConnectionId(self.random, self.allocator);
+        defer self.allocator.free(client_conn_id);
+
         // Create SSH_QUIC_INIT message
         const init_msg = kex_init.SshQuicInit{
-            .client_connection_id = "",
+            .client_connection_id = client_conn_id,
             .server_name_indication = server_name,
             .client_quic_versions = quic_versions,
             .client_quic_trnsp_params = quic_params,
@@ -173,6 +186,9 @@ pub const ClientKeyExchange = struct {
             server_data.host_key,
         );
 
+        const host_fingerprint = try computeHostKeyFingerprint(self.allocator, server_data.host_key);
+        errdefer self.allocator.free(host_fingerprint);
+
         // Verify server host key against trusted fingerprint set (if configured)
         try verifyTrustedHostKey(
             self.allocator,
@@ -191,6 +207,7 @@ pub const ClientKeyExchange = struct {
         self.shared_secret = shared_secret;
         self.exchange_hash = exchange_hash;
         self.reply_message = reply;
+        self.server_host_key_fingerprint = host_fingerprint;
 
         return .{
             .client_secret = quic_secrets.client_secret,
@@ -205,6 +222,10 @@ pub const ClientKeyExchange = struct {
     /// Must be called after processReply() has completed successfully.
     pub fn getExchangeHash(self: *const Self) []const u8 {
         return self.exchange_hash orelse &[_]u8{};
+    }
+
+    pub fn getServerHostKeyFingerprint(self: *const Self) []const u8 {
+        return self.server_host_key_fingerprint orelse &[_]u8{};
     }
 };
 
@@ -233,6 +254,12 @@ pub const ServerKeyExchange = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.shared_secret) |*secret| {
+            std.crypto.secureZero(u8, secret);
+        }
+        if (self.ephemeral_key) |*ek| {
+            std.crypto.secureZero(u8, &ek.private_key);
+        }
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -291,7 +318,7 @@ pub const ServerKeyExchange = struct {
         );
 
         // Generate server ephemeral key
-        const server_ephemeral = kex_curve25519.ServerEphemeralKey.generate(self.random);
+        const server_ephemeral = try kex_curve25519.ServerEphemeralKey.generate(self.random);
 
         // Calculate shared secret K
         const shared_secret = try kex_curve25519.calculateSharedSecret(
@@ -736,7 +763,7 @@ test "ClientKeyExchange - create init" {
     var prng = std.Random.DefaultPrng.init(12345);
     const random = prng.random();
 
-    var client = ClientKeyExchange.init(allocator, random);
+    var client = try ClientKeyExchange.init(allocator, random);
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
@@ -755,7 +782,7 @@ test "Full key exchange - client and server" {
     const random = prng.random();
 
     // Client side
-    var client = ClientKeyExchange.init(allocator, random);
+    var client = try ClientKeyExchange.init(allocator, random);
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
@@ -829,7 +856,7 @@ test "Full key exchange - trusted host fingerprint enforcement" {
 
     // Happy path with trusted fingerprint
     {
-        var client_ok = ClientKeyExchange.init(allocator, random);
+        var client_ok = try ClientKeyExchange.init(allocator, random);
         defer client_ok.deinit();
 
         const init_data = try client_ok.createInit("localhost", &quic_versions, "client_params", &[_][]const u8{trusted_fp});
@@ -852,7 +879,7 @@ test "Full key exchange - trusted host fingerprint enforcement" {
 
     // Failure path with mismatched trusted fingerprint
     {
-        var client_bad = ClientKeyExchange.init(allocator, random);
+        var client_bad = try ClientKeyExchange.init(allocator, random);
         defer client_bad.deinit();
 
         const bad_fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

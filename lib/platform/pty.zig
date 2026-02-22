@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const user = @import("user.zig");
 
 // External C functions for PTY
 extern "c" fn grantpt(fd: c_int) c_int;
@@ -89,6 +90,8 @@ pub const ShellEnv = struct {
     shell: [*:0]const u8,
     user: [*:0]const u8,
     logname: [*:0]const u8,
+    uid: ?std.posix.uid_t = null,
+    gid: ?std.posix.gid_t = null,
 };
 
 /// Spawn a shell in a PTY
@@ -117,31 +120,48 @@ fn childSetup(pty: *Pty, env: ShellEnv) !void {
     }
 
     // Open PTY slave
-    const slave_fd = try posix.open(
+    var slave_fd = try posix.open(
         pty.slave_path,
         .{ .ACCMODE = .RDWR },
         0,
     );
-    errdefer posix.close(slave_fd);
 
     // Make slave the controlling terminal
     const TIOCSCTTY = 0x540E; // Linux ioctl number for setting controlling terminal
     if (std.c.ioctl(slave_fd, TIOCSCTTY, @as(c_int, 0)) != 0) {
+        posix.close(slave_fd);
         return error.IoctlFailed;
     }
 
     // Redirect stdin, stdout, stderr to PTY slave
-    try posix.dup2(slave_fd, 0); // stdin
-    try posix.dup2(slave_fd, 1); // stdout
-    try posix.dup2(slave_fd, 2); // stderr
+    posix.dup2(slave_fd, 0) catch {
+        posix.close(slave_fd);
+        return error.DupFailed;
+    };
+    posix.dup2(slave_fd, 1) catch {
+        posix.close(slave_fd);
+        return error.DupFailed;
+    };
+    posix.dup2(slave_fd, 2) catch {
+        posix.close(slave_fd);
+        return error.DupFailed;
+    };
 
     // Close original slave fd if it's not 0, 1, or 2
     if (slave_fd > 2) {
         posix.close(slave_fd);
+        slave_fd = 0; // sentinel — fd is now stdin
     }
 
     // Close master fd (child doesn't need it)
     posix.close(pty.master_fd);
+
+    // Apply user identity (setuid/setgid) — must happen after PTY setup
+    // but before exec. If the server isn't running as root, initgroups
+    // will fail; skip silently since the shell works as the current user.
+    if (env.uid != null and env.gid != null) {
+        user.applyIdentityRaw(env.user, env.uid.?, env.gid.?) catch {};
+    }
 
     // Set environment variables (same as SSH does)
     _ = setenv("TERM", env.term, 1);
