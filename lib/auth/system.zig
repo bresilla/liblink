@@ -57,8 +57,13 @@ fn matchAuthorizedKey(
 
     std.base64.standard.Decoder.decode(decoded, base64_key) catch return false;
 
-    // Compare with provided public key blob
-    return std.mem.eql(u8, decoded, public_key_blob);
+    // Compare with provided public key blob using constant-time comparison
+    if (decoded.len != public_key_blob.len) return false;
+    var diff: u8 = 0;
+    for (decoded, public_key_blob) |a, b| {
+        diff |= a ^ b;
+    }
+    return diff == 0;
 }
 
 /// Validate public key against user's authorized_keys

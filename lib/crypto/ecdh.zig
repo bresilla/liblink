@@ -13,20 +13,22 @@ pub const KeyPair = struct {
     public_key: [public_key_size]u8,
     private_key: [private_key_size]u8,
 
-    pub fn generate(random: std.Random) KeyPair {
+    pub fn generate(random: std.Random) EcdhError!KeyPair {
         var private_key: [private_key_size]u8 = undefined;
         random.bytes(&private_key);
-        
-        const public_key = crypto.dh.X25519.recoverPublicKey(private_key) catch unreachable;
-        
+
+        const public_key = crypto.dh.X25519.recoverPublicKey(private_key) catch
+            return error.KeyExchangeFailed;
+
         return .{
             .public_key = public_key,
             .private_key = private_key,
         };
     }
 
-    pub fn fromPrivateKey(private_key: [private_key_size]u8) KeyPair {
-        const public_key = crypto.dh.X25519.recoverPublicKey(private_key) catch unreachable;
+    pub fn fromPrivateKey(private_key: [private_key_size]u8) EcdhError!KeyPair {
+        const public_key = crypto.dh.X25519.recoverPublicKey(private_key) catch
+            return error.KeyExchangeFailed;
         return .{
             .public_key = public_key,
             .private_key = private_key,
@@ -53,8 +55,8 @@ test "X25519 key exchange" {
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
 
-    const alice = KeyPair.generate(random);
-    const bob = KeyPair.generate(random);
+    const alice = try KeyPair.generate(random);
+    const bob = try KeyPair.generate(random);
 
     const alice_shared = try exchange(&alice.private_key, &bob.public_key);
     const bob_shared = try exchange(&bob.private_key, &alice.public_key);

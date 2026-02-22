@@ -87,8 +87,8 @@ pub const PasswordAuthRequest = struct {
 
     /// Zero password from memory and free resources
     pub fn deinit(self: *PasswordAuthRequest, allocator: Allocator) void {
-        // Zero password before freeing
-        @memset(self.password, 0);
+        // Zero password before freeing (compiler cannot optimize this away)
+        std.crypto.secureZero(u8, self.password);
         allocator.free(self.password);
 
         allocator.free(self.user_name);
@@ -190,9 +190,9 @@ pub const PasswordChangeRequest = struct {
 
     /// Zero passwords from memory and free resources
     pub fn deinit(self: *PasswordChangeRequest, allocator: Allocator) void {
-        // Zero both passwords before freeing
-        @memset(self.old_password, 0);
-        @memset(self.new_password, 0);
+        // Zero both passwords before freeing (compiler cannot optimize this away)
+        std.crypto.secureZero(u8, self.old_password);
+        std.crypto.secureZero(u8, self.new_password);
         allocator.free(self.old_password);
         allocator.free(self.new_password);
 

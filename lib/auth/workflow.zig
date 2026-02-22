@@ -5,7 +5,6 @@ const wire = @import("../protocol/wire.zig");
 
 pub const ClientAuthOptions = struct {
     identity_path: ?[]const u8 = null,
-    password: ?[]const u8 = null,
 };
 
 /// Build SSH public key blob: string(algorithm) + string(public_key)
@@ -24,7 +23,7 @@ pub fn encodePublicKeyBlob(
     return buffer;
 }
 
-/// Try identity authentication first (if provided), then password fallback.
+/// Authenticate using public key identity.
 pub fn authenticateClient(
     allocator: std.mem.Allocator,
     conn: *connection.ClientConnection,
@@ -43,6 +42,7 @@ pub fn authenticateClient(
         }
 
         var private_key: [64]u8 = undefined;
+        defer std.crypto.secureZero(u8, &private_key);
         @memcpy(&private_key, parsed.private_key[0..64]);
 
         const public_key_blob = try encodePublicKeyBlob(allocator, parsed.algorithm_name, parsed.public_key);
@@ -57,9 +57,5 @@ pub fn authenticateClient(
         if (key_authed) return true;
     }
 
-    if (options.password) |password| {
-        return conn.authenticatePassword(username, password);
-    }
-
-    return error.PasswordRequired;
+    return error.NoIdentityProvided;
 }

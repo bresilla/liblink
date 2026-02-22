@@ -96,7 +96,7 @@ pub const ClientConnection = struct {
         // NOTE: Don't deinit udp_transport - we'll pass its socket to QUIC
 
         // Initialize key exchange
-        var kex = kex_exchange.ClientKeyExchange.init(allocator, config.random);
+        var kex = try kex_exchange.ClientKeyExchange.init(allocator, config.random);
         errdefer kex.deinit();
 
         // Create SSH_QUIC_INIT message
@@ -184,46 +184,6 @@ pub const ClientConnection = struct {
     /// Receive data from a channel
     pub fn receiveData(self: *Self, channel_id: u64, buffer: []u8) !usize {
         return self.transport.receiveFromStream(channel_id, buffer);
-    }
-
-    /// Authenticate with password
-    ///
-    /// Uses stream 0 for authentication protocol.
-    /// Returns true on success, false on failure.
-    pub fn authenticatePassword(self: *Self, username: []const u8, password: []const u8) !bool {
-        var auth_client = auth.AuthClient.init(self.allocator, username);
-
-        // Create authentication request
-        const request_data = try auth_client.authenticatePassword(password);
-        defer self.allocator.free(request_data);
-
-        try self.ensureAuthStreamOpen();
-
-        // Send on stream 0 (authentication stream)
-        try self.transport.sendOnStream(0, request_data);
-
-        while (true) {
-            var result = try self.receiveAuthResult(&auth_client);
-            switch (result) {
-                .success => {
-                    result.deinit(self.allocator);
-                    return true;
-                },
-                .failure => {
-                    result.deinit(self.allocator);
-                    return false;
-                },
-                .pk_ok => {
-                    result.deinit(self.allocator);
-                    continue;
-                },
-                .banner => |b| {
-                    std.log.info("Server banner: {s}", .{b.message});
-                    result.deinit(self.allocator);
-                    continue;
-                },
-            }
-        }
     }
 
     /// Authenticate with public key
@@ -501,15 +461,11 @@ pub const ServerConnection = struct {
     ///
     /// Receives authentication request on stream 0, validates credentials,
     /// and sends response. Returns true if authentication succeeds.
-    ///
-    /// Use setPasswordValidator() and setPublicKeyValidator() to provide
-    /// credential validation callbacks.
     pub fn handleAuthentication(
         self: *Self,
-        password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !bool {
-        const identity = try self.handleAuthenticationIdentity(password_validator, publickey_validator);
+        const identity = try self.handleAuthenticationIdentity(publickey_validator);
         if (identity) |user| {
             self.allocator.free(user);
             return true;
@@ -521,16 +477,11 @@ pub const ServerConnection = struct {
     /// Caller owns returned memory when non-null.
     pub fn handleAuthenticationIdentity(
         self: *Self,
-        password_validator: ?auth.AuthServer.PasswordValidator,
         publickey_validator: ?auth.AuthServer.PublicKeyValidator,
     ) !?[]u8 {
         std.log.info("Waiting for authentication request...", .{});
 
         var auth_server = auth.AuthServer.init(self.allocator);
-        if (password_validator) |validator| {
-            auth_server.setPasswordValidator(validator);
-            std.log.debug("Password authentication enabled", .{});
-        }
         if (publickey_validator) |validator| {
             auth_server.setPublicKeyValidator(validator);
             std.log.debug("Public key authentication enabled", .{});
@@ -919,12 +870,6 @@ test "ServerConfig - initialization" {
     try testing.expectEqualStrings("0.0.0.0", config.listen_address);
 }
 
-// Test helper: password validator
-fn testPasswordValidator(username: []const u8, password: []const u8) bool {
-    std.log.info("Password validation: user={s}, password={s}", .{ username, password });
-    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass123");
-}
-
 // Test helper: public key validator
 fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     _ = public_key_blob;
@@ -935,74 +880,11 @@ fn testPublicKeyValidator(username: []const u8, algorithm: []const u8, public_ke
 test "ServerConnection - authentication validators" {
     const testing = std.testing;
 
-    // Test password validator
-    try testing.expect(testPasswordValidator("testuser", "testpass123"));
-    try testing.expect(!testPasswordValidator("testuser", "wrongpass"));
-    try testing.expect(!testPasswordValidator("wronguser", "testpass123"));
-
     // Test public key validator
     const dummy_key = "dummy-key";
     try testing.expect(testPublicKeyValidator("keyuser", "ssh-ed25519", dummy_key));
     try testing.expect(!testPublicKeyValidator("keyuser", "ssh-rsa", dummy_key));
     try testing.expect(!testPublicKeyValidator("wronguser", "ssh-ed25519", dummy_key));
-}
-
-test "AuthServer integration - password authentication flow" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    // Create auth server
-    var auth_server = auth.AuthServer.init(allocator);
-    auth_server.setPasswordValidator(testPasswordValidator);
-
-    // Create password authentication request
-    var request = @import("protocol/userauth.zig").UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "testpass123" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "test-exchange-hash";
-
-    // Process request
-    var response = try auth_server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    // Verify success
-    try testing.expect(response.success);
-}
-
-test "AuthServer integration - password authentication failure" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    // Create auth server
-    var auth_server = auth.AuthServer.init(allocator);
-    auth_server.setPasswordValidator(testPasswordValidator);
-
-    // Create password authentication request with wrong password
-    var request = @import("protocol/userauth.zig").UserauthRequest{
-        .username = "testuser",
-        .service_name = "ssh-connection",
-        .method_name = "password",
-        .method_data = .{ .password = "wrongpass" },
-    };
-
-    const request_data = try request.encode(allocator);
-    defer allocator.free(request_data);
-
-    const exchange_hash = "test-exchange-hash";
-
-    // Process request
-    var response = try auth_server.processRequest(request_data, exchange_hash);
-    defer response.deinit(allocator);
-
-    // Verify failure
-    try testing.expect(!response.success);
 }
 
 test "ConnectionListener - init and shutdown" {

@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const crypto = @import("../crypto/crypto.zig");
 
 /// Obfuscated envelope constants
-pub const obfs_nonce_size = 16;
+pub const obfs_nonce_size = 12;
 pub const obfs_tag_size = 16;
 pub const obfs_key_size = 32; // SHA-256 output
 

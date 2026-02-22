@@ -236,7 +236,7 @@ pub const SessionRuntime = struct {
         var term_buf: [256]u8 = undefined;
         var term_ptr: [*:0]const u8 = "xterm-256color";
         if (pty_info) |info| {
-            if (info.term.len < term_buf.len - 1) {
+            if (info.term.len > 0 and info.term.len < term_buf.len - 1 and isValidTermName(info.term)) {
                 @memcpy(term_buf[0..info.term.len], info.term);
                 term_buf[info.term.len] = 0;
                 term_ptr = @ptrCast(term_buf[0..info.term.len :0]);
@@ -359,6 +359,15 @@ pub const SessionRuntime = struct {
         server_conn.channel_manager.sendEof(stream_id) catch {};
         server_conn.channel_manager.closeChannel(stream_id) catch {};
         _ = self.session_modes.fetchRemove(stream_id);
+    }
+
+    fn isValidTermName(term: []const u8) bool {
+        for (term) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch != '.') {
+                return false;
+            }
+        }
+        return true;
     }
 
     fn bridgeSession(self: *Self, server_conn: *connection.ServerConnection, stream_id: u64) !void {

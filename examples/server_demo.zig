@@ -36,7 +36,7 @@ pub fn main() !void {
     std.debug.print("Server configuration:\n", .{});
     std.debug.print("  Address: {s}:{d}\n", .{ listen_addr, listen_port });
     std.debug.print("  Protocol: SSH/QUIC\n", .{});
-    std.debug.print("  Auth methods: password, publickey\n\n", .{});
+    std.debug.print("  Auth methods: publickey\n\n", .{});
 
     // Start server listener
     std.debug.print("Starting server listener...\n", .{});
@@ -117,7 +117,6 @@ fn handleClient(
     std.debug.print("Waiting for authentication...\n", .{});
 
     const auth_success = connection.handleAuthentication(
-        validatePassword,
         validatePublicKey,
     ) catch |err| {
         std.debug.print("✗ Authentication error: {}\n", .{err});
@@ -173,19 +172,6 @@ fn handleClient(
 }
 
 // === Authentication Validators ===
-
-fn validatePassword(username: []const u8, password: []const u8) bool {
-    std.debug.print("  Password auth: user={s}\n", .{username});
-
-    // Demo: Accept testuser/testpass
-    if (std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass")) {
-        std.debug.print("  ✓ Password accepted\n", .{});
-        return true;
-    }
-
-    std.debug.print("  ✗ Password rejected\n", .{});
-    return false;
-}
 
 fn validatePublicKey(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     std.debug.print("  Public key auth: user={s}, algo={s}\n", .{ username, algorithm });

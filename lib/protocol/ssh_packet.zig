@@ -32,6 +32,7 @@ pub const SshPacket = struct {
         var writer = wire.Writer{ .buffer = buffer };
 
         // Write payload length with compression flag if needed
+        if (self.payload.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
         var payload_len: u32 = @intCast(self.payload.len);
         if (self.compressed) {
             payload_len |= compression_flag;

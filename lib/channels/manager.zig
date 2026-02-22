@@ -77,7 +77,7 @@ pub const ChannelManager = struct {
         // Send CHANNEL_OPEN message
         const open_msg = channel_protocol.ChannelOpen{
             .channel_type = channel_type,
-            .sender_channel = @intCast(stream_id), // Use stream ID as channel ID
+            .sender_channel = if (stream_id > std.math.maxInt(u32)) return error.StreamIdOverflow else @intCast(stream_id),
             .initial_window_size = initial_window_size,
             .maximum_packet_size = maximum_packet_size,
             .type_specific_data = type_specific_data,
@@ -134,7 +134,7 @@ pub const ChannelManager = struct {
         std.log.debug("DEBUG: Creating CHANNEL_OPEN_CONFIRMATION", .{});
         // Send CHANNEL_OPEN_CONFIRMATION
         const confirm_msg = channel_protocol.ChannelOpenConfirmation{
-            .sender_channel = @intCast(stream_id),
+            .sender_channel = if (stream_id > std.math.maxInt(u32)) return error.StreamIdOverflow else @intCast(stream_id),
             .initial_window_size = open_msg.initial_window_size,
             .maximum_packet_size = open_msg.maximum_packet_size,
             .type_specific_data = "",
@@ -285,6 +285,7 @@ pub const ChannelManager = struct {
 
         // Parse data length (4 bytes, big-endian)
         const data_len = std.mem.readInt(u32, buffer[1..5], .big);
+        if (data_len > buffer.len - 5) return error.MessageTooLarge;
         const total_msg_len = 5 + data_len; // header (5 bytes) + data
 
         // std.log.debug("receiveData: message claims {} bytes of data, total message = {} bytes", .{ data_len, total_msg_len });

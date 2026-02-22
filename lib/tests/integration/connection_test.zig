@@ -2,10 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const syslink = @import("../../syslink.zig");
 
-fn passwordValidator(username: []const u8, password: []const u8) bool {
-    return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, password, "testpass");
-}
-
 fn publicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     _ = public_key_blob;
     return std.mem.eql(u8, username, "testuser") and std.mem.eql(u8, algorithm, "ssh-ed25519");
@@ -21,26 +17,6 @@ fn encodePublicKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) 
     try writer.writeString(alg);
     try writer.writeString(public_key);
     return blob;
-}
-
-test "Integration: password auth client/server roundtrip" {
-    const allocator = testing.allocator;
-
-    var client = syslink.auth.client.AuthClient.init(allocator, "testuser");
-    var server = syslink.auth.dispatcher.AuthServer.init(allocator);
-    server.setPasswordValidator(passwordValidator);
-
-    const request = try client.authenticatePassword("testpass");
-    defer allocator.free(request);
-
-    var response = try server.processRequest(request, "exchange_hash");
-    defer response.deinit(allocator);
-
-    try testing.expect(response.success);
-
-    var result = try client.processResponse(response.data);
-    defer result.deinit(allocator);
-    try testing.expect(result == .success);
 }
 
 test "Integration: publickey auth two-step roundtrip" {

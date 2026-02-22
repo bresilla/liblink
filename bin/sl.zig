@@ -95,7 +95,6 @@ fn printHelp() !void {
         \\      Any user with a system account can connect.
         \\
         \\CLIENT OPTIONS:
-        \\    -p, --password <pass>       Use password authentication
         \\    -i, --identity <key>        Use public key authentication
         \\    --strict-host-key           Require host to exist in known hosts
         \\    --accept-new-host-key       Trust on first use (default)
@@ -361,7 +360,6 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
 
         const authenticated_user = server_conn.handleAuthenticationIdentity(
-            null,
             Validators.keyValidator,
         ) catch |err| {
             std.debug.print("✗ Authentication error: {}\n\n", .{err});
@@ -508,64 +506,14 @@ fn restoreTerminalMode(original: *const anyopaque) void {
     _ = c.tcsetattr(std.posix.STDIN_FILENO, c.TCSAFLUSH, orig);
 }
 
-fn getPassword(allocator: std.mem.Allocator, prompt: []const u8) ![]const u8 {
-    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
-
-    try stdout.writeAll(prompt);
-
-    // Disable echo using termios
-    var old_termios: c.termios = undefined;
-    var new_termios: c.termios = undefined;
-
-    if (c.tcgetattr(stdin.handle, &old_termios) != 0) {
-        return error.TermiosGetFailed;
-    }
-
-    new_termios = old_termios;
-    new_termios.c_lflag &= ~@as(c_uint, c.ECHO);
-
-    if (c.tcsetattr(stdin.handle, c.TCSANOW, &new_termios) != 0) {
-        return error.TermiosSetFailed;
-    }
-
-    defer {
-        _ = c.tcsetattr(stdin.handle, c.TCSANOW, &old_termios);
-        stdout.writeAll("\n") catch {};
-    }
-
-    var buffer: [256]u8 = undefined;
-    const bytes_read = try stdin.read(&buffer);
-
-    if (bytes_read == 0) return error.NoPasswordProvided;
-
-    const line = if (std.mem.indexOfScalar(u8, buffer[0..bytes_read], '\n')) |idx|
-        buffer[0..idx]
-    else
-        buffer[0..bytes_read];
-
-    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
-    if (trimmed.len == 0) return error.EmptyPassword;
-
-    return try allocator.dupe(u8, trimmed);
-}
-
 fn authenticateClient(
     allocator: std.mem.Allocator,
     conn: *syslink.connection.ClientConnection,
     username: []const u8,
-    password_arg: ?[]const u8,
     identity_path: ?[]const u8,
 ) !bool {
-    const password_owned = if (password_arg == null)
-        try getPassword(allocator, "Password: ")
-    else
-        null;
-    defer if (password_owned) |pw| allocator.free(pw);
-
     return try syslink.auth.workflow.authenticateClient(allocator, conn, username, .{
         .identity_path = identity_path,
-        .password = if (password_arg) |pw| pw else password_owned,
     });
 }
 
@@ -584,7 +532,6 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.debug.print("Error: Host required\n", .{});
         std.debug.print("Usage: sl shell [options] [user@]host[:port]\n", .{});
         std.debug.print("Options:\n", .{});
-        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
         std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
@@ -592,7 +539,6 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     }
 
     // Parse options
-    var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
     var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
@@ -600,14 +546,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
-            if (i + 1 >= args.len) {
-                std.debug.print("Error: -p requires a password argument\n", .{});
-                std.process.exit(1);
-            }
-            i += 1;
-            password_arg = args[i];
-        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+        if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
             if (i + 1 >= args.len) {
                 std.debug.print("Error: -i requires a key file path\n", .{});
                 std.process.exit(1);
@@ -653,7 +592,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     std.debug.print("✓ Connected\n", .{});
 
-    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -780,7 +719,6 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.debug.print("Error: Host and command required\n", .{});
         std.debug.print("Usage: sl exec [options] [user@]host[:port] <command>\n", .{});
         std.debug.print("Options:\n", .{});
-        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
         std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
@@ -788,7 +726,6 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.process.exit(1);
     }
 
-    var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
     var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var positionals = std.ArrayListUnmanaged([]const u8){};
@@ -797,14 +734,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
-            if (i + 1 >= args.len) {
-                std.debug.print("Error: -p requires a password argument\n", .{});
-                std.process.exit(1);
-            }
-            i += 1;
-            password_arg = args[i];
-        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+        if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
             if (i + 1 >= args.len) {
                 std.debug.print("Error: -i requires a key file path\n", .{});
                 std.process.exit(1);
@@ -851,7 +781,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     };
     defer conn.deinit();
 
-    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -891,14 +821,12 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.debug.print("Error: Host required\n", .{});
         std.debug.print("Usage: sl sftp [options] [user@]host[:port]\n", .{});
         std.debug.print("Options:\n", .{});
-        std.debug.print("  -p, --password <pass>  Password for authentication\n", .{});
         std.debug.print("  -i, --identity <key>   Private key for public key authentication\n", .{});
         std.debug.print("  --strict-host-key      Require host in known hosts\n", .{});
         std.debug.print("  --accept-new-host-key  Trust unknown host and persist (default)\n", .{});
         std.process.exit(1);
     }
 
-    var password_arg: ?[]const u8 = null;
     var identity_path: ?[]const u8 = null;
     var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
@@ -906,14 +834,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--password")) {
-            if (i + 1 >= args.len) {
-                std.debug.print("Error: -p requires a password argument\n", .{});
-                std.process.exit(1);
-            }
-            i += 1;
-            password_arg = args[i];
-        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
+        if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--identity")) {
             if (i + 1 >= args.len) {
                 std.debug.print("Error: -i requires a key file path\n", .{});
                 std.process.exit(1);
@@ -955,7 +876,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
 
     std.debug.print("✓ Connected\n", .{});
 
-    const auth_success = authenticateClient(allocator, &conn, username, password_arg, identity_path) catch |err| {
+    const auth_success = authenticateClient(allocator, &conn, username, identity_path) catch |err| {
         std.debug.print("✗ Authentication failed: {}\n", .{err});
         std.process.exit(1);
     };

@@ -21,7 +21,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     ctx.auth_ok.store(true, .release);
 }
 
-test "Integration: network client/server password auth e2e" {
+test "Integration: network client/server publickey auth e2e" {
     const allocator = testing.allocator;
 
     try network_test_utils.requireEnvEnabled(allocator, "SYSLINK_NETWORK_E2E");

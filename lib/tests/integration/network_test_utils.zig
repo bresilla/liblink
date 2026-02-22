@@ -2,7 +2,7 @@ const std = @import("std");
 const syslink = @import("../../syslink.zig");
 
 pub const USERNAME = "e2e-user";
-pub const PASSWORD = "e2e-pass";
+pub const TEST_KEY_SEED: [32]u8 = [_]u8{0x42} ** 32;
 
 pub const READY_WAIT_MAX_ATTEMPTS: usize = 200;
 pub const READY_WAIT_SLEEP_MS: u64 = 5;
@@ -40,8 +40,9 @@ pub fn markFailed(failed: *std.atomic.Value(bool)) void {
     failed.store(true, .release);
 }
 
-pub fn validatePassword(username: []const u8, password: []const u8) bool {
-    return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, password, PASSWORD);
+pub fn validatePublicKey(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
+    _ = public_key_blob;
+    return std.mem.eql(u8, username, USERNAME) and std.mem.eql(u8, algorithm, "ssh-ed25519");
 }
 
 pub fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![]u8 {
@@ -109,7 +110,7 @@ pub fn startAndAcceptAuthenticatedServer(base: *CommonServerThreadCtx, prng_seed
 
 pub fn acceptAuthenticatedConnection(listener: *syslink.connection.ConnectionListener) !*syslink.connection.ServerConnection {
     const server_conn = try listener.acceptConnection();
-    const auth_ok = try server_conn.handleAuthentication(validatePassword, null);
+    const auth_ok = try server_conn.handleAuthentication(validatePublicKey);
     if (!auth_ok) {
         listener.removeConnection(server_conn);
         return error.AuthenticationFailed;
@@ -128,7 +129,19 @@ pub fn connectAuthenticatedClient(
     var client = try syslink.connection.connectClient(allocator, "127.0.0.1", port, random);
     errdefer client.deinit();
 
-    const authed = try client.authenticatePassword(USERNAME, PASSWORD);
+    const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(TEST_KEY_SEED);
+    var private_key: [64]u8 = undefined;
+    @memcpy(&private_key, &keypair.secret_key.bytes);
+
+    const alg = "ssh-ed25519";
+    const blob_size = 4 + alg.len + 4 + 32;
+    const pub_blob = try allocator.alloc(u8, blob_size);
+    defer allocator.free(pub_blob);
+    var writer = syslink.protocol.wire.Writer{ .buffer = pub_blob };
+    try writer.writeString(alg);
+    try writer.writeString(&keypair.public_key.bytes);
+
+    const authed = try client.authenticatePublicKey(USERNAME, alg, pub_blob, &private_key);
     if (!authed) {
         return error.AuthenticationFailed;
     }

@@ -39,8 +39,8 @@ pub const ClientKeyExchange = struct {
     const Self = @This();
 
     /// Initialize client key exchange
-    pub fn init(allocator: Allocator, random: std.Random) Self {
-        const ephemeral_key = kex_curve25519.ClientEphemeralKey.generate(random);
+    pub fn init(allocator: Allocator, random: std.Random) !Self {
+        const ephemeral_key = try kex_curve25519.ClientEphemeralKey.generate(random);
 
         return Self{
             .allocator = allocator,
@@ -56,6 +56,10 @@ pub const ClientKeyExchange = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.shared_secret) |*secret| {
+            std.crypto.secureZero(u8, secret);
+        }
+        std.crypto.secureZero(u8, &self.ephemeral_key.private_key);
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -246,6 +250,12 @@ pub const ServerKeyExchange = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.shared_secret) |*secret| {
+            std.crypto.secureZero(u8, secret);
+        }
+        if (self.ephemeral_key) |*ek| {
+            std.crypto.secureZero(u8, &ek.private_key);
+        }
         if (self.init_message) |*msg| {
             msg.deinit(self.allocator);
         }
@@ -304,7 +314,7 @@ pub const ServerKeyExchange = struct {
         );
 
         // Generate server ephemeral key
-        const server_ephemeral = kex_curve25519.ServerEphemeralKey.generate(self.random);
+        const server_ephemeral = try kex_curve25519.ServerEphemeralKey.generate(self.random);
 
         // Calculate shared secret K
         const shared_secret = try kex_curve25519.calculateSharedSecret(
@@ -749,7 +759,7 @@ test "ClientKeyExchange - create init" {
     var prng = std.Random.DefaultPrng.init(12345);
     const random = prng.random();
 
-    var client = ClientKeyExchange.init(allocator, random);
+    var client = try ClientKeyExchange.init(allocator, random);
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
@@ -768,7 +778,7 @@ test "Full key exchange - client and server" {
     const random = prng.random();
 
     // Client side
-    var client = ClientKeyExchange.init(allocator, random);
+    var client = try ClientKeyExchange.init(allocator, random);
     defer client.deinit();
 
     const quic_versions = [_]u32{1};
@@ -842,7 +852,7 @@ test "Full key exchange - trusted host fingerprint enforcement" {
 
     // Happy path with trusted fingerprint
     {
-        var client_ok = ClientKeyExchange.init(allocator, random);
+        var client_ok = try ClientKeyExchange.init(allocator, random);
         defer client_ok.deinit();
 
         const init_data = try client_ok.createInit("localhost", &quic_versions, "client_params", &[_][]const u8{trusted_fp});
@@ -865,7 +875,7 @@ test "Full key exchange - trusted host fingerprint enforcement" {
 
     // Failure path with mismatched trusted fingerprint
     {
-        var client_bad = ClientKeyExchange.init(allocator, random);
+        var client_bad = try ClientKeyExchange.init(allocator, random);
         defer client_bad.deinit();
 
         const bad_fp = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";

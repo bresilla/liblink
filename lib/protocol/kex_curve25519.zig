@@ -14,8 +14,8 @@ pub const ClientEphemeralKey = struct {
     private_key: [32]u8,
 
     /// Generate a new client ephemeral key pair
-    pub fn generate(random: std.Random) ClientEphemeralKey {
-        const kp = crypto.ecdh.KeyPair.generate(random);
+    pub fn generate(random: std.Random) !ClientEphemeralKey {
+        const kp = try crypto.ecdh.KeyPair.generate(random);
         return ClientEphemeralKey{
             .public_key = kp.public_key,
             .private_key = kp.private_key,
@@ -71,8 +71,8 @@ pub const ServerEphemeralKey = struct {
     private_key: [32]u8,
 
     /// Generate a new server ephemeral key pair
-    pub fn generate(random: std.Random) ServerEphemeralKey {
-        const kp = crypto.ecdh.KeyPair.generate(random);
+    pub fn generate(random: std.Random) !ServerEphemeralKey {
+        const kp = try crypto.ecdh.KeyPair.generate(random);
         return ServerEphemeralKey{
             .public_key = kp.public_key,
             .private_key = kp.private_key,
@@ -226,7 +226,7 @@ test "ClientEphemeralKey - generate and encode" {
     var prng = std.Random.DefaultPrng.init(12345);
     const random = prng.random();
 
-    const client_key = ClientEphemeralKey.generate(random);
+    const client_key = try ClientEphemeralKey.generate(random);
 
     // Encode
     const encoded = try client_key.encodeClientData(allocator);
@@ -246,7 +246,7 @@ test "ClientEphemeralKey - encode and decode" {
     var prng = std.Random.DefaultPrng.init(54321);
     const random = prng.random();
 
-    const client_key = ClientEphemeralKey.generate(random);
+    const client_key = try ClientEphemeralKey.generate(random);
 
     // Encode
     const encoded = try client_key.encodeClientData(allocator);
@@ -266,7 +266,7 @@ test "ServerEphemeralKey - encode and decode" {
     var prng = std.Random.DefaultPrng.init(99999);
     const random = prng.random();
 
-    const server_key = ServerEphemeralKey.generate(random);
+    const server_key = try ServerEphemeralKey.generate(random);
     const host_key = "ssh-ed25519 AAAA...";
     const signature = "signature_data_here";
 
@@ -292,8 +292,8 @@ test "calculateSharedSecret - basic functionality" {
     const random = prng.random();
 
     // Generate two key pairs
-    const alice = ClientEphemeralKey.generate(random);
-    const bob = ServerEphemeralKey.generate(random);
+    const alice = try ClientEphemeralKey.generate(random);
+    const bob = try ServerEphemeralKey.generate(random);
 
     // Calculate shared secrets
     const alice_secret = try calculateSharedSecret(&alice.private_key, &bob.public_key);

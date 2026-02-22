@@ -5,7 +5,7 @@ const syslink = @import("syslink");
 ///
 /// Demonstrates the full stack:
 /// 1. Connection establishment (UDP key exchange + QUIC)
-/// 2. Authentication (password or public key)
+/// 2. Authentication (public key)
 /// 3. Shell session
 /// 4. Command execution
 /// 5. SFTP file operations
@@ -25,7 +25,7 @@ pub fn main() !void {
     const server_host = "127.0.0.1";
     const server_port: u16 = 2222;
     const username = "testuser";
-    const password = "testpass";
+    const identity_path = "~/.ssh/id_ed25519";
 
     std.debug.print("Target: {s}:{d}\n", .{ server_host, server_port });
     std.debug.print("Username: {s}\n\n", .{username});
@@ -54,18 +54,17 @@ pub fn main() !void {
     // === Phase 2: Authentication ===
     std.debug.print("Phase 2: Authenticating...\n", .{});
 
-    const auth_success = connection.authenticatePassword(username, password) catch |err| {
-        std.debug.print("✗ Authentication error: {}\n", .{err});
-        return err;
-    };
+    const auth_success = try syslink.auth.workflow.authenticateClient(allocator, &connection, username, .{
+        .identity_path = identity_path,
+    });
 
     if (!auth_success) {
-        std.debug.print("✗ Authentication failed: Invalid credentials\n", .{});
+        std.debug.print("✗ Authentication failed\n", .{});
         return error.AuthenticationFailed;
     }
 
     std.debug.print("✓ Authenticated successfully\n", .{});
-    std.debug.print("  • Password auth: ✓\n\n", .{});
+    std.debug.print("  • Public key auth: ✓\n\n", .{});
 
     // === Phase 3: Command Execution ===
     std.debug.print("Phase 3: Executing remote command...\n", .{});
