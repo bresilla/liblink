@@ -94,9 +94,13 @@ pub const ClientKeyExchange = struct {
         const client_kex_data = try self.ephemeral_key.encodeClientData(self.allocator);
         defer self.allocator.free(client_kex_data);
 
+        // Generate client connection ID (QUIC requires both sides have one)
+        const client_conn_id = try generateConnectionId(self.random, self.allocator);
+        defer self.allocator.free(client_conn_id);
+
         // Create SSH_QUIC_INIT message
         const init_msg = kex_init.SshQuicInit{
-            .client_connection_id = "",
+            .client_connection_id = client_conn_id,
             .server_name_indication = server_name,
             .client_quic_versions = quic_versions,
             .client_quic_trnsp_params = quic_params,

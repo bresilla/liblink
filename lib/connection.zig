@@ -313,11 +313,9 @@ pub const ClientConnection = struct {
     }
 
     fn ensureAuthStreamOpen(self: *Self) !void {
-        _ = self.transport.openStream() catch |err| blk: {
-            // Stream might already exist, that's fine for stream 0 auth flow.
-            std.log.debug("Stream 0 open result: {}", .{err});
-            break :blk 0;
-        };
+        // Stream 0 is pre-created in QUIC connection init for auth.
+        // No need to open a new stream — that would waste a stream ID.
+        _ = self;
     }
 
     fn receiveAuthResult(self: *Self, auth_client: *auth.AuthClient) !auth.AuthResult {

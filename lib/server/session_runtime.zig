@@ -34,7 +34,7 @@ const PtySession = struct {
     allocator: std.mem.Allocator,
 
     fn deinit(self: *PtySession) void {
-        _ = std.posix.waitpid(self.pid, 0);
+        _ = std.posix.waitpid(self.pid, std.c.W.NOHANG);
         self.pty.deinit();
         self.allocator.destroy(self.pty);
     }
@@ -96,11 +96,16 @@ pub const SessionRuntime = struct {
         }
 
         var session_started = false;
+        const session_deadline = std.time.milliTimestamp() + 30000;
         while (!session_started) {
-            try server_conn.transport.poll(30000);
+            if (std.time.milliTimestamp() >= session_deadline) {
+                return error.SessionRequestTimeout;
+            }
+
+            server_conn.transport.poll(100) catch {};
 
             var buffer: [4096]u8 = undefined;
-            const len = try server_conn.transport.receiveFromStream(stream_id, &buffer);
+            const len = server_conn.transport.receiveFromStream(stream_id, &buffer) catch 0;
             if (len == 0) continue;
 
             var request_info = try server_conn.channel_manager.handleRequest(stream_id, buffer[0..len]);
@@ -397,15 +402,20 @@ pub const SessionRuntime = struct {
             }
 
             const pty_len = p.read(&pty_buffer) catch |err| {
-                if (err == error.WouldBlock) continue;
+                if (err == error.WouldBlock) {
+                    // Check if child process has exited
+                    const wait_result = std.posix.waitpid(session.pid, std.c.W.NOHANG);
+                    if (wait_result.pid != 0) break; // child exited
+                    continue;
+                }
                 server_conn.channel_manager.sendEof(stream_id) catch {};
                 server_conn.channel_manager.closeChannel(stream_id) catch {};
                 break;
             };
 
-            if (pty_len > 0) {
-                try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
-            }
+            if (pty_len == 0) break; // EOF — child exited
+
+            try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
         }
 
         server_conn.channel_manager.sendEof(stream_id) catch {};
