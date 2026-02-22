@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 
 const Duplex = struct {
     allocator: std.mem.Allocator,
@@ -99,7 +99,7 @@ const ServerThreadCtx = struct {
 };
 
 fn serverThreadMain(ctx: *ServerThreadCtx) void {
-    var server = syslink.sftp.SftpServer.initWithHooks(
+    var server = liblink.sftp.SftpServer.initWithHooks(
         ctx.allocator,
         ctx.duplex,
         serverSendHook,
@@ -115,7 +115,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
 test "Integration: in-process SFTP client/server e2e" {
     const allocator = testing.allocator;
 
-    const tmp_root = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-e2e-{}", .{std.time.nanoTimestamp()});
+    const tmp_root = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-e2e-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_root);
     defer std.fs.cwd().deleteTree(tmp_root) catch {};
     try std.fs.cwd().makePath(tmp_root);
@@ -130,9 +130,12 @@ test "Integration: in-process SFTP client/server e2e" {
     };
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_ctx});
-    defer server_thread.join();
+    defer {
+        duplex.close();
+        server_thread.join();
+    }
 
-    var client = try syslink.sftp.SftpClient.initWithHooks(
+    var client = try liblink.sftp.SftpClient.initWithHooks(
         allocator,
         &duplex,
         clientSendHook,
@@ -141,15 +144,15 @@ test "Integration: in-process SFTP client/server e2e" {
     );
     defer client.deinit();
 
-    try client.mkdir("/docs", syslink.sftp.attributes.FileAttributes.init());
+    try client.mkdir("/docs", liblink.sftp.attributes.FileAttributes.init());
 
-    const open_flags = syslink.sftp.protocol.OpenFlags{
+    const open_flags = liblink.sftp.protocol.OpenFlags{
         .read = true,
         .write = true,
         .creat = true,
         .trunc = true,
     };
-    var handle = try client.open("/docs/hello.txt", open_flags, syslink.sftp.attributes.FileAttributes.init());
+    var handle = try client.open("/docs/hello.txt", open_flags, liblink.sftp.attributes.FileAttributes.init());
     defer handle.deinit(allocator);
 
     try client.write(handle, 0, "hello-sftp");
@@ -173,6 +176,4 @@ test "Integration: in-process SFTP client/server e2e" {
     try client.rename("/docs/hello.txt", "/docs/renamed.txt");
     try client.remove("/docs/renamed.txt");
     try client.rmdir("/docs");
-
-    duplex.close();
 }

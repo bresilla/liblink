@@ -1,5 +1,5 @@
 .{
-    .name = .syslink,
+    .name = .liblink,
     .version = "0.0.2",
     .dependencies = .{
         .runquic = .{
@@ -14,5 +14,5 @@
         "examples",
         "lib",
     },
-    .fingerprint = 0xc55b9533dacbf6c7,
+    .fingerprint = 0xa9bc5bd0209a865,
 }

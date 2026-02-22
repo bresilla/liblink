@@ -694,7 +694,7 @@ pub const SftpServer = struct {
 
         std.log.info("SFTP REMOVE: path={s}", .{filename});
 
-        const resolved_path = self.resolveClientPath(filename) catch |err| {
+        const resolved_path = self.resolveClientPathNoFollow(filename) catch |err| {
             const status_code = statusFromError(err);
             try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
@@ -826,7 +826,7 @@ pub const SftpServer = struct {
         const path = try reader.readString(self.allocator);
         defer self.allocator.free(path);
 
-        const resolved_path = self.resolveClientPath(path) catch |err| {
+        const resolved_path = self.resolveClientPathNoFollow(path) catch |err| {
             const status_code = statusFromError(err);
             try self.sendStatus(request_id, status_code, statusMessage(status_code), "");
             return;
@@ -1006,6 +1006,52 @@ pub const SftpServer = struct {
             out.deinit(self.allocator);
             return resolved;
         }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    /// Like resolveClientPath but validates the parent directory instead of
+    /// following symlinks on the final component.  Used by remove/unlink so
+    /// that deleting a symlink removes the link itself rather than its target.
+    fn resolveClientPathNoFollow(self: *SftpServer, client_path: []const u8) ![]u8 {
+        var parts = std.ArrayListUnmanaged([]const u8){};
+        defer parts.deinit(self.allocator);
+
+        var it = std.mem.splitScalar(u8, client_path, '/');
+        while (it.next()) |segment| {
+            if (segment.len == 0 or std.mem.eql(u8, segment, ".")) continue;
+            if (std.mem.eql(u8, segment, "..")) {
+                if (parts.items.len == 0) return error.AccessDenied;
+                _ = parts.pop();
+                continue;
+            }
+            try parts.append(self.allocator, segment);
+            if (parts.items.len > max_path_depth) return error.AccessDenied;
+        }
+
+        var out = std.ArrayListUnmanaged(u8){};
+        errdefer out.deinit(self.allocator);
+
+        try out.appendSlice(self.allocator, self.remote_root);
+        for (parts.items) |part| {
+            if (out.items.len == 0 or out.items[out.items.len - 1] != '/') {
+                try out.append(self.allocator, '/');
+            }
+            try out.appendSlice(self.allocator, part);
+        }
+
+        if (out.items.len == 0) {
+            try out.append(self.allocator, '/');
+        }
+
+        // Validate parent directory is within root
+        const candidate = out.items;
+        const parent = std.fs.path.dirname(candidate) orelse self.remote_root;
+        const parent_real = try std.fs.cwd().realpathAlloc(self.allocator, parent);
+        defer self.allocator.free(parent_real);
+
+        const v = try self.toVirtualPath(parent_real);
+        self.allocator.free(v);
 
         return out.toOwnedSlice(self.allocator);
     }
@@ -1509,7 +1555,7 @@ test "SftpServer - applyPathAttributes updates file size" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 
@@ -1575,7 +1621,7 @@ test "SftpServer - open/write/read flow" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-flow-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-flow-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 
@@ -1618,7 +1664,7 @@ test "SftpServer - stat and lstat differ on symlink" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/syslink-sftp-link-{}", .{std.time.nanoTimestamp()});
+    const tmp_base = try std.fmt.allocPrint(allocator, "/tmp/liblink-sftp-link-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_base);
     defer std.fs.cwd().deleteTree(tmp_base) catch {};
 

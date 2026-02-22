@@ -1,4 +1,4 @@
-# SysLink - SSH/QUIC Implementation
+# LibLink - SSH/QUIC Implementation
 
 A complete implementation of the SSH/QUIC protocol in Zig, providing secure remote access and file transfer over QUIC transport.
 
@@ -41,8 +41,8 @@ A complete implementation of the SSH/QUIC protocol in Zig, providing secure remo
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/syslink.git
-cd syslink
+git clone https://github.com/yourusername/liblink.git
+cd liblink
 
 # Build the project
 zig build
@@ -86,7 +86,7 @@ ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key
 
 ```zig
 const std = @import("std");
-const syslink = @import("syslink");
+const liblink = @import("liblink");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -97,7 +97,7 @@ pub fn main() !void {
     const random = prng.random();
 
     // Connect to server
-    var conn = try syslink.connection.connectClient(
+    var conn = try liblink.connection.connectClient(
         allocator,
         "server.example.com",
         2222,
@@ -134,7 +134,7 @@ std.debug.print("Output: {s}\n", .{output});
 var sftp_channel = try conn.openSftp();
 defer sftp_channel.deinit();
 
-var sftp = try syslink.sftp.SftpClient.init(allocator, sftp_channel);
+var sftp = try liblink.sftp.SftpClient.init(allocator, sftp_channel);
 defer sftp.deinit();
 
 // List directory
@@ -154,7 +154,7 @@ for (entries) |entry| {
 }
 
 // Read file
-const flags = syslink.sftp.protocol.OpenFlags{ .read = true };
+const flags = liblink.sftp.protocol.OpenFlags{ .read = true };
 const handle = try sftp.open("/remote/file.txt", flags, .{});
 defer sftp.close(handle) catch {};
 
@@ -168,7 +168,7 @@ std.debug.print("File contents: {s}\n", .{data});
 
 ```zig
 const std = @import("std");
-const syslink = @import("syslink");
+const liblink = @import("liblink");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -183,7 +183,7 @@ pub fn main() !void {
     random.bytes(&host_private_key);
 
     // Start server
-    var listener = try syslink.connection.startServer(
+    var listener = try liblink.connection.startServer(
         allocator,
         "0.0.0.0",
         2222,
@@ -285,9 +285,9 @@ fn validatePublicKey(username: []const u8, algo: []const u8, key: []const u8) bo
 ## Project Structure
 
 ```
-syslink/
+liblink/
 ├── lib/                    # Library implementation
-│   ├── voidbox.zig        # Main entry point
+│   ├── liblink.zig        # Main entry point
 │   ├── connection.zig     # Connection management
 │   ├── auth/              # Authentication
 │   ├── channels/          # SSH channels

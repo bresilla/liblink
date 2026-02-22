@@ -14,9 +14,9 @@ pub fn pidFilePath(allocator: std.mem.Allocator) ![]u8 {
     defer if (runtime_dir) |dir| allocator.free(dir);
 
     if (runtime_dir) |dir| {
-        return std.fmt.allocPrint(allocator, "{s}/syslink-server-{}.pid", .{ dir, uid });
+        return std.fmt.allocPrint(allocator, "{s}/liblink-server-{}.pid", .{ dir, uid });
     }
-    return std.fmt.allocPrint(allocator, "/tmp/syslink-server-{}.pid", .{uid});
+    return std.fmt.allocPrint(allocator, "/tmp/liblink-server-{}.pid", .{uid});
 }
 
 pub fn writePidFile(allocator: std.mem.Allocator, pid: std.process.Child.Id) !void {

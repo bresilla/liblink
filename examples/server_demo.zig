@@ -1,5 +1,5 @@
 const std = @import("std");
-const syslink = @import("syslink");
+const liblink = @import("liblink");
 
 /// Complete SSH/QUIC Server Demo
 ///
@@ -42,7 +42,7 @@ pub fn main() !void {
     std.debug.print("Starting server listener...\n", .{});
 
     const host_key_str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."; // Placeholder
-    var listener = syslink.connection.startServer(
+    var listener = liblink.connection.startServer(
         allocator,
         listen_addr,
         listen_port,
@@ -108,8 +108,8 @@ pub fn main() !void {
 
 fn handleClient(
     allocator: std.mem.Allocator,
-    connection: *syslink.connection.ServerConnection,
-    listener: *syslink.connection.ConnectionListener,
+    connection: *liblink.connection.ServerConnection,
+    listener: *liblink.connection.ConnectionListener,
 ) !void {
     // Ensure connection is cleaned up when this function returns
     defer listener.removeConnection(connection);
@@ -225,7 +225,7 @@ fn handleSubsystemRequest(stream_id: u64, subsystem_name: []const u8) !void {
         std.debug.print("  ✓ SFTP subsystem handler called\n", .{});
         std.debug.print("  Note: SFTP server can be started here\n", .{});
         std.debug.print("  Example:\n", .{});
-        std.debug.print("    var sftp_server = try syslink.sftp.SftpServer.init(allocator, sftp_channel);\n", .{});
+        std.debug.print("    var sftp_server = try liblink.sftp.SftpServer.init(allocator, sftp_channel);\n", .{});
         std.debug.print("    defer sftp_server.deinit();\n", .{});
         std.debug.print("    try sftp_server.run(); // Process SFTP requests\n", .{});
     } else {

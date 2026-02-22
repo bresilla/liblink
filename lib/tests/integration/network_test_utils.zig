@@ -1,5 +1,5 @@
 const std = @import("std");
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 
 pub const USERNAME = "e2e-user";
 pub const TEST_KEY_SEED: [32]u8 = [_]u8{0x42} ** 32;
@@ -10,7 +10,7 @@ pub const SESSION_CHANNEL_TIMEOUT_MS: u32 = 30_000;
 
 pub const RunningServer = struct {
     allocator: std.mem.Allocator,
-    listener: syslink.connection.ConnectionListener,
+    listener: liblink.connection.ConnectionListener,
     host_key_blob: []u8,
 
     pub fn deinit(self: *RunningServer) void {
@@ -21,7 +21,7 @@ pub const RunningServer = struct {
 
 pub const AcceptedServer = struct {
     server: RunningServer,
-    conn: *syslink.connection.ServerConnection,
+    conn: *liblink.connection.ServerConnection,
 
     pub fn deinit(self: *AcceptedServer) void {
         self.server.listener.removeConnection(self.conn);
@@ -51,7 +51,7 @@ pub fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8
     const buffer = try allocator.alloc(u8, size);
     errdefer allocator.free(buffer);
 
-    var writer = syslink.protocol.wire.Writer{ .buffer = buffer };
+    var writer = liblink.protocol.wire.Writer{ .buffer = buffer };
     try writer.writeString(alg);
     try writer.writeString(public_key);
     return buffer;
@@ -74,7 +74,7 @@ pub fn startLocalTestServer(
     const host_key_blob = try encodeHostKeyBlob(allocator, &ed_keypair.public_key.bytes);
     errdefer allocator.free(host_key_blob);
 
-    var listener = try syslink.connection.startServer(
+    var listener = try liblink.connection.startServer(
         allocator,
         "127.0.0.1",
         port,
@@ -108,7 +108,7 @@ pub fn startAndAcceptAuthenticatedServer(base: *CommonServerThreadCtx, prng_seed
     };
 }
 
-pub fn acceptAuthenticatedConnection(listener: *syslink.connection.ConnectionListener) !*syslink.connection.ServerConnection {
+pub fn acceptAuthenticatedConnection(listener: *liblink.connection.ConnectionListener) !*liblink.connection.ServerConnection {
     const server_conn = try listener.acceptConnection();
     const auth_ok = try server_conn.handleAuthentication(validatePublicKey);
     if (!auth_ok) {
@@ -122,11 +122,11 @@ pub fn connectAuthenticatedClient(
     allocator: std.mem.Allocator,
     port: u16,
     prng_seed: u64,
-) !syslink.connection.ClientConnection {
+) !liblink.connection.ClientConnection {
     var prng = std.Random.DefaultPrng.init(prng_seed);
     const random = prng.random();
 
-    var client = try syslink.connection.connectClient(allocator, "127.0.0.1", port, random);
+    var client = try liblink.connection.connectClient(allocator, "127.0.0.1", port, random);
     errdefer client.deinit();
 
     const keypair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(TEST_KEY_SEED);
@@ -137,7 +137,7 @@ pub fn connectAuthenticatedClient(
     const blob_size = 4 + alg.len + 4 + 32;
     const pub_blob = try allocator.alloc(u8, blob_size);
     defer allocator.free(pub_blob);
-    var writer = syslink.protocol.wire.Writer{ .buffer = pub_blob };
+    var writer = liblink.protocol.wire.Writer{ .buffer = pub_blob };
     try writer.writeString(alg);
     try writer.writeString(&keypair.public_key.bytes);
 
@@ -177,7 +177,7 @@ pub fn waitForServerReady(base: *CommonServerThreadCtx) !void {
     if (base.failed.load(.acquire)) return error.ServerStartupFailed;
 }
 
-pub fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, timeout_ms: u32) !u64 {
+pub fn waitForSessionChannel(server_conn: *liblink.connection.ServerConnection, timeout_ms: u32) !u64 {
     const deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
     while (std.time.milliTimestamp() < deadline_ms) {
         server_conn.transport.poll(50) catch {};
@@ -193,7 +193,7 @@ pub fn waitForSessionChannel(server_conn: *syslink.connection.ServerConnection, 
 }
 
 pub fn waitForChannelRequestType(
-    server_conn: *syslink.connection.ServerConnection,
+    server_conn: *liblink.connection.ServerConnection,
     stream_id: u64,
     expected_request_type: []const u8,
     timeout_ms: u32,
@@ -223,7 +223,7 @@ pub fn waitForChannelRequestType(
 }
 
 pub fn waitForChannelRequestString(
-    server_conn: *syslink.connection.ServerConnection,
+    server_conn: *liblink.connection.ServerConnection,
     stream_id: u64,
     expected_request_type: []const u8,
     timeout_ms: u32,
@@ -236,6 +236,6 @@ pub fn waitForChannelRequestString(
     );
     defer server_conn.allocator.free(request_data);
 
-    var reader = syslink.protocol.wire.Reader{ .buffer = request_data };
+    var reader = liblink.protocol.wire.Reader{ .buffer = request_data };
     return reader.readString(server_conn.allocator);
 }

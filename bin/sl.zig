@@ -1,5 +1,5 @@
 const std = @import("std");
-const syslink = @import("syslink");
+const liblink = @import("liblink");
 const builtin = @import("builtin");
 
 const c = @cImport({
@@ -153,8 +153,8 @@ fn runServerCommand(allocator: std.mem.Allocator, args: []const []const u8) !voi
 }
 
 /// Handle session channel and requests
-fn handleSession(server_conn: *syslink.connection.ServerConnection, authenticated_user: []const u8) !void {
-    var runtime = try syslink.server.session_runtime.SessionRuntime.init(server_conn.allocator, authenticated_user);
+fn handleSession(server_conn: *liblink.connection.ServerConnection, authenticated_user: []const u8) !void {
+    var runtime = try liblink.server.session_runtime.SessionRuntime.init(server_conn.allocator, authenticated_user);
     defer runtime.deinit();
     try runtime.run(server_conn);
 }
@@ -208,12 +208,12 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("  Auth: System users (like SSH)\n\n", .{});
 
     if (daemon_mode and !foreground_internal) {
-        if (syslink.server.daemon.readPidFile(allocator)) |existing_pid| {
-            if (syslink.server.daemon.processAlive(existing_pid)) {
+        if (liblink.server.daemon.readPidFile(allocator)) |existing_pid| {
+            if (liblink.server.daemon.processAlive(existing_pid)) {
                 std.debug.print("Server already running with pid {}\n", .{existing_pid});
                 return error.ServerAlreadyRunning;
             }
-            syslink.server.daemon.removePidFile(allocator);
+            liblink.server.daemon.removePidFile(allocator);
         } else |_| {}
 
         const exe_path = try std.fs.selfExePathAlloc(allocator);
@@ -245,7 +245,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
         child.stderr_behavior = .Ignore;
         try child.spawn();
 
-        try syslink.server.daemon.writePidFile(allocator, child.id);
+        try liblink.server.daemon.writePidFile(allocator, child.id);
         std.debug.print("✓ Server started in daemon mode (pid {})\n", .{child.id});
         std.debug.print("Use `sl server status` to check health and `sl server stop` to stop it.\n", .{});
         return;
@@ -259,7 +259,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var host_public_key: [32]u8 = undefined;
 
     if (host_key_path) |path| {
-        var parsed = try syslink.auth.keyfile.parsePrivateKeyFile(allocator, path);
+        var parsed = try liblink.auth.keyfile.parsePrivateKeyFile(allocator, path);
         defer parsed.deinit();
 
         if (parsed.key_type != .ed25519) {
@@ -287,7 +287,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     std.debug.print("Starting server...\n", .{});
 
-    var listener = syslink.connection.startServer(
+    var listener = liblink.connection.startServer(
         allocator,
         listen_addr,
         listen_port,
@@ -349,7 +349,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
             fn keyValidator(user: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
                 std.debug.print("  → Checking public key for user '{s}' (algorithm: {s})\n", .{ user, algorithm });
 
-                if (syslink.auth.system.validatePublicKey(user, algorithm, public_key_blob)) {
+                if (liblink.auth.system.validatePublicKey(user, algorithm, public_key_blob)) {
                     std.debug.print("  ✓ Public key authenticated\n", .{});
                     return true;
                 }
@@ -385,7 +385,7 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (foreground_internal) {
-        syslink.server.daemon.removePidFile(allocator);
+        liblink.server.daemon.removePidFile(allocator);
     }
     std.debug.print("Server stopped\n", .{});
 }
@@ -393,14 +393,14 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 fn serverStop(allocator: std.mem.Allocator) !void {
     std.debug.print("Stopping SSH/QUIC server...\n", .{});
 
-    const pid = syslink.server.daemon.readPidFile(allocator) catch |err| switch (err) {
+    const pid = liblink.server.daemon.readPidFile(allocator) catch |err| switch (err) {
         error.FileNotFound => {
-            const pid_file = syslink.server.daemon.pidFilePath(allocator) catch null;
+            const pid_file = liblink.server.daemon.pidFilePath(allocator) catch null;
             if (pid_file) |p| {
                 defer allocator.free(p);
                 std.debug.print("No pid file found ({s}). Server may not be running as daemon.\n", .{p});
             } else {
-                std.debug.print("No pid file found (/tmp/syslink-server-<uid>.pid). Server may not be running as daemon.\n", .{});
+                std.debug.print("No pid file found (/tmp/liblink-server-<uid>.pid). Server may not be running as daemon.\n", .{});
             }
             return;
         },
@@ -410,29 +410,29 @@ fn serverStop(allocator: std.mem.Allocator) !void {
         else => return err,
     };
 
-    if (!syslink.server.daemon.processAlive(pid)) {
+    if (!liblink.server.daemon.processAlive(pid)) {
         std.debug.print("Stale pid file found for pid {}. Cleaning up.\n", .{pid});
-        syslink.server.daemon.removePidFile(allocator);
+        liblink.server.daemon.removePidFile(allocator);
         return;
     }
 
     try std.posix.kill(pid, std.posix.SIG.TERM);
 
-    syslink.server.daemon.removePidFile(allocator);
+    liblink.server.daemon.removePidFile(allocator);
     std.debug.print("✓ Sent SIGTERM to server pid {}\n", .{pid});
 }
 
 fn serverStatus(allocator: std.mem.Allocator) !void {
     std.debug.print("Checking server status...\n", .{});
 
-    const pid = syslink.server.daemon.readPidFile(allocator) catch |err| switch (err) {
+    const pid = liblink.server.daemon.readPidFile(allocator) catch |err| switch (err) {
         error.FileNotFound => {
-            const pid_file = syslink.server.daemon.pidFilePath(allocator) catch null;
+            const pid_file = liblink.server.daemon.pidFilePath(allocator) catch null;
             if (pid_file) |p| {
                 defer allocator.free(p);
                 std.debug.print("Server not running (no pid file at {s}).\n", .{p});
             } else {
-                std.debug.print("Server not running (no pid file at /tmp/syslink-server-<uid>.pid).\n", .{});
+                std.debug.print("Server not running (no pid file at /tmp/liblink-server-<uid>.pid).\n", .{});
             }
             return;
         },
@@ -442,7 +442,7 @@ fn serverStatus(allocator: std.mem.Allocator) !void {
         else => return err,
     };
 
-    if (syslink.server.daemon.processAlive(pid)) {
+    if (liblink.server.daemon.processAlive(pid)) {
         std.debug.print("✓ Server is running (pid {})\n", .{pid});
     } else {
         std.debug.print("Server is not running, but pid file exists (stale pid {}).\n", .{pid});
@@ -508,11 +508,11 @@ fn restoreTerminalMode(original: *const anyopaque) void {
 
 fn authenticateClient(
     allocator: std.mem.Allocator,
-    conn: *syslink.connection.ClientConnection,
+    conn: *liblink.connection.ClientConnection,
     username: []const u8,
     identity_path: ?[]const u8,
 ) !bool {
-    return try syslink.auth.workflow.authenticateClient(allocator, conn, username, .{
+    return try liblink.auth.workflow.authenticateClient(allocator, conn, username, .{
         .identity_path = identity_path,
     });
 }
@@ -522,9 +522,9 @@ fn connectClientWithHostTrust(
     hostname: []const u8,
     port: u16,
     random: std.Random,
-    policy: syslink.connection.HostKeyTrustPolicy,
-) !syslink.connection.ClientConnection {
-    return syslink.connection.connectClientTrusted(allocator, hostname, port, random, policy);
+    policy: liblink.connection.HostKeyTrustPolicy,
+) !liblink.connection.ClientConnection {
+    return liblink.connection.connectClientTrusted(allocator, hostname, port, random, policy);
 }
 
 fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -540,7 +540,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     // Parse options
     var identity_path: ?[]const u8 = null;
-    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
+    var trust_policy: liblink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -567,7 +567,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.process.exit(1);
     }
 
-    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
+    const endpoint = liblink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
         std.debug.print("Error: Invalid endpoint format\n", .{});
         std.process.exit(1);
     };
@@ -653,7 +653,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     }
 }
 
-fn runShellInteractive(allocator: std.mem.Allocator, session: *syslink.channels.SessionChannel) !void {
+fn runShellInteractive(allocator: std.mem.Allocator, session: *liblink.channels.SessionChannel) !void {
     _ = allocator;
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
@@ -727,7 +727,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     }
 
     var identity_path: ?[]const u8 = null;
-    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
+    var trust_policy: liblink.connection.HostKeyTrustPolicy = .accept_new;
     var positionals = std.ArrayListUnmanaged([]const u8){};
     defer positionals.deinit(allocator);
 
@@ -764,7 +764,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     }
     const command = command_buf.items;
 
-    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg, "root", 2222) catch {
+    const endpoint = liblink.network.endpoint.parseUserHostPort(host_arg, "root", 2222) catch {
         std.debug.print("Error: Invalid endpoint format\n", .{});
         std.process.exit(1);
     };
@@ -800,7 +800,7 @@ fn runExecCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
     const stderr = std.fs.File{ .handle = std.posix.STDERR_FILENO };
 
-    var result = syslink.channels.collectExecResult(allocator, &session, 5000) catch |err| {
+    var result = liblink.channels.collectExecResult(allocator, &session, 5000) catch |err| {
         std.debug.print("✗ Failed to read exec output: {}\n", .{err});
         return;
     };
@@ -828,7 +828,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     }
 
     var identity_path: ?[]const u8 = null;
-    var trust_policy: syslink.connection.HostKeyTrustPolicy = .accept_new;
+    var trust_policy: liblink.connection.HostKeyTrustPolicy = .accept_new;
     var host_arg: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -855,7 +855,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
         std.process.exit(1);
     }
 
-    const endpoint = syslink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
+    const endpoint = liblink.network.endpoint.parseUserHostPort(host_arg.?, "root", 2222) catch {
         std.debug.print("Error: Invalid endpoint format\n", .{});
         std.process.exit(1);
     };
@@ -894,7 +894,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     };
     defer sftp_channel.deinit();
 
-    var sftp_client = syslink.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
+    var sftp_client = liblink.sftp.SftpClient.init(allocator, sftp_channel) catch |err| {
         std.debug.print("✗ Failed to initialize SFTP client: {}\n", .{err});
         std.process.exit(1);
     };
@@ -905,7 +905,7 @@ fn runSftpCommand(allocator: std.mem.Allocator, args: []const []const u8) !void 
     try runSftpInteractive(allocator, &sftp_client);
 }
 
-fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient) !void {
+fn runSftpInteractive(allocator: std.mem.Allocator, client: *liblink.sftp.SftpClient) !void {
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
@@ -997,10 +997,10 @@ fn runSftpInteractive(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCl
     try stdout.writeAll("Goodbye.\n");
 }
 
-fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, path: []const u8) !void {
+fn sftpListDirectory(allocator: std.mem.Allocator, client: *liblink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const entries = syslink.sftp.workflow.listDirectory(client, path) catch |err| {
+    const entries = liblink.sftp.workflow.listDirectory(client, path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error listing directory: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -1019,10 +1019,10 @@ fn sftpListDirectory(allocator: std.mem.Allocator, client: *syslink.sftp.SftpCli
     }
 }
 
-fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
+fn sftpDownloadFile(allocator: std.mem.Allocator, client: *liblink.sftp.SftpClient, remote_path: []const u8, local_path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const total_bytes = syslink.sftp.workflow.downloadFileToLocal(allocator, client, remote_path, local_path) catch |err| {
+    const total_bytes = liblink.sftp.workflow.downloadFileToLocal(allocator, client, remote_path, local_path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error downloading file: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -1034,11 +1034,11 @@ fn sftpDownloadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClie
     try stdout.writeAll(msg);
 }
 
-fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
+fn sftpUploadFile(allocator: std.mem.Allocator, client: *liblink.sftp.SftpClient, local_path: []const u8, remote_path: []const u8) !void {
     _ = allocator;
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    const total_bytes = syslink.sftp.workflow.uploadFileFromLocal(client, local_path, remote_path) catch |err| {
+    const total_bytes = liblink.sftp.workflow.uploadFileFromLocal(client, local_path, remote_path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error uploading file: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -1050,10 +1050,10 @@ fn sftpUploadFile(allocator: std.mem.Allocator, client: *syslink.sftp.SftpClient
     try stdout.writeAll(msg);
 }
 
-fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
+fn sftpMkdir(client: *liblink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    syslink.sftp.workflow.makeDirectory(client, path) catch |err| {
+    liblink.sftp.workflow.makeDirectory(client, path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error creating directory: {}\n", .{err});
         try stdout.writeAll(msg);
@@ -1064,10 +1064,10 @@ fn sftpMkdir(client: *syslink.sftp.SftpClient, path: []const u8) !void {
     try stdout.writeAll("\n");
 }
 
-fn sftpRemove(client: *syslink.sftp.SftpClient, path: []const u8) !void {
+fn sftpRemove(client: *liblink.sftp.SftpClient, path: []const u8) !void {
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
-    syslink.sftp.workflow.removeFile(client, path) catch |err| {
+    liblink.sftp.workflow.removeFile(client, path) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Error removing file: {}\n", .{err});
         try stdout.writeAll(msg);

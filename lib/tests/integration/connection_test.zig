@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 
 fn publicKeyValidator(username: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
     _ = public_key_blob;
@@ -13,7 +13,7 @@ fn encodePublicKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) 
     const blob = try allocator.alloc(u8, size);
     errdefer allocator.free(blob);
 
-    var writer = syslink.protocol.wire.Writer{ .buffer = blob };
+    var writer = liblink.protocol.wire.Writer{ .buffer = blob };
     try writer.writeString(alg);
     try writer.writeString(public_key);
     return blob;
@@ -29,8 +29,8 @@ test "Integration: publickey auth two-step roundtrip" {
     const pub_blob = try encodePublicKeyBlob(allocator, &ed.public_key.bytes);
     defer allocator.free(pub_blob);
 
-    var client = syslink.auth.client.AuthClient.init(allocator, "testuser");
-    var server = syslink.auth.dispatcher.AuthServer.init(allocator);
+    var client = liblink.auth.client.AuthClient.init(allocator, "testuser");
+    var server = liblink.auth.dispatcher.AuthServer.init(allocator);
     server.setPublicKeyValidator(publicKeyValidator);
 
     // Step 1: query (no signature) -> PK_OK
@@ -40,7 +40,7 @@ test "Integration: publickey auth two-step roundtrip" {
     var query_resp = try server.processRequest(query, "exchange_hash");
     defer query_resp.deinit(allocator);
     try testing.expect(!query_resp.success);
-    try testing.expectEqual(@as(u8, syslink.common.constants.SSH_MSG.USERAUTH_PK_OK), query_resp.data[0]);
+    try testing.expectEqual(@as(u8, liblink.common.constants.SSH_MSG.USERAUTH_PK_OK), query_resp.data[0]);
 
     var query_result = try client.processResponse(query_resp.data);
     defer query_result.deinit(allocator);

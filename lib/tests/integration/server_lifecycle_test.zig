@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 
 fn chooseTestPort() u16 {
     const ts: u64 = @intCast(std.time.nanoTimestamp());
@@ -14,7 +14,7 @@ fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![
     const buffer = try allocator.alloc(u8, size);
     errdefer allocator.free(buffer);
 
-    var writer = syslink.protocol.wire.Writer{ .buffer = buffer };
+    var writer = liblink.protocol.wire.Writer{ .buffer = buffer };
     try writer.writeString(alg);
     try writer.writeString(public_key);
     return buffer;
@@ -34,7 +34,7 @@ test "Integration: listener shutdown rejects acceptConnection" {
     var prng = std.Random.DefaultPrng.init(0x4455_6677);
     const random = prng.random();
 
-    var listener = try syslink.connection.startServer(
+    var listener = try liblink.connection.startServer(
         allocator,
         "127.0.0.1",
         port,

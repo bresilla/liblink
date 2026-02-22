@@ -1,7 +1,7 @@
 const std = @import("std");
 const runquic_transport = @import("runquic_transport");
 
-/// SysLink adapter around runquic transport implementation.
+/// LibLink adapter around runquic transport implementation.
 ///
 /// Keeps third-party transport API coupling isolated to one file so upstream
 /// runquic changes only require updates here.
@@ -62,6 +62,6 @@ pub const QuicTransport = struct {
 comptime {
     const T = runquic_transport.QuicTransport;
     if (!@hasDecl(T, "init") or !@hasDecl(T, "openStream") or !@hasDecl(T, "closeStream") or !@hasDecl(T, "sendOnStream") or !@hasDecl(T, "receiveFromStream") or !@hasDecl(T, "poll") or !@hasDecl(T, "deinit")) {
-        @compileError("runquic_transport.QuicTransport no longer matches SysLink adapter expectations");
+        @compileError("runquic_transport.QuicTransport no longer matches LibLink adapter expectations");
     }
 }

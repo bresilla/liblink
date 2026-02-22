@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
 const SERVER_PRNG_SEED: u64 = 0x2468_1357;
@@ -27,7 +27,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     };
 }
 
-fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void {
+fn tryHandleExecSession(server_conn: *liblink.connection.ServerConnection) !void {
     const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
     const command = try network_test_utils.waitForChannelRequestString(
         server_conn,
@@ -55,7 +55,7 @@ fn tryHandleExecSession(server_conn: *syslink.connection.ServerConnection) !void
 test "Integration: network exec e2e returns stdout stderr and exit-status" {
     const allocator = testing.allocator;
 
-    try network_test_utils.requireEnvEnabled(allocator, "SYSLINK_NETWORK_EXEC_E2E");
+    try network_test_utils.requireEnvEnabled(allocator, "LIBLINK_NETWORK_EXEC_E2E");
 
     var server_ctx = ServerThreadCtx{
         .allocator = allocator,
@@ -72,7 +72,7 @@ test "Integration: network exec e2e returns stdout stderr and exit-status" {
     var session = try client.requestExec(EXPECTED_COMMAND);
     defer session.close() catch {};
 
-    var result = try syslink.channels.collectExecResult(allocator, &session, 5000);
+    var result = try liblink.channels.collectExecResult(allocator, &session, 5000);
     defer result.deinit();
 
     try testing.expectEqualStrings(EXPECTED_STDOUT, result.stdout);

@@ -7,7 +7,7 @@ pub fn defaultPath(allocator: std.mem.Allocator) ![]u8 {
     };
     defer allocator.free(home);
 
-    return std.fmt.allocPrint(allocator, "{s}/.ssh/syslink_known_hosts", .{home});
+    return std.fmt.allocPrint(allocator, "{s}/.ssh/liblink_known_hosts", .{home});
 }
 
 pub fn hostKeyForEndpoint(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
@@ -112,7 +112,7 @@ test "known_hosts add and load by explicit path" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/syslink-known-hosts-{}", .{std.time.nanoTimestamp()});
+    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/liblink-known-hosts-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_path);
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 

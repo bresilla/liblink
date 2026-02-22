@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const syslink = @import("../../syslink.zig");
+const liblink = @import("../../liblink.zig");
 const network_test_utils = @import("network_test_utils.zig");
 
 const SERVER_PRNG_SEED: u64 = 0x9abc_def0;
@@ -25,7 +25,7 @@ fn serverThreadMain(ctx: *ServerThreadCtx) void {
     };
 }
 
-fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remote_root: []const u8) !void {
+fn tryHandleSftpSession(server_conn: *liblink.connection.ServerConnection, remote_root: []const u8) !void {
     const stream_id = try network_test_utils.waitForSessionChannel(server_conn, network_test_utils.SESSION_CHANNEL_TIMEOUT_MS);
     const subsystem_name = try network_test_utils.waitForChannelRequestString(
         server_conn,
@@ -39,13 +39,13 @@ fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remot
         return error.UnsupportedSubsystem;
     }
 
-    const session_channel = syslink.channels.SessionChannel{
+    const session_channel = liblink.channels.SessionChannel{
         .manager = &server_conn.channel_manager,
         .stream_id = stream_id,
         .allocator = server_conn.allocator,
     };
-    const sftp_channel = syslink.sftp.SftpChannel.init(server_conn.allocator, session_channel);
-    var sftp_server = try syslink.sftp.SftpServer.initWithOptions(server_conn.allocator, sftp_channel, .{
+    const sftp_channel = liblink.sftp.SftpChannel.init(server_conn.allocator, session_channel);
+    var sftp_server = try liblink.sftp.SftpServer.initWithOptions(server_conn.allocator, sftp_channel, .{
         .remote_root = remote_root,
     });
     defer sftp_server.deinit();
@@ -58,9 +58,9 @@ fn tryHandleSftpSession(server_conn: *syslink.connection.ServerConnection, remot
 test "Integration: network SFTP subsystem e2e" {
     const allocator = testing.allocator;
 
-    try network_test_utils.requireEnvEnabled(allocator, "SYSLINK_NETWORK_SFTP_E2E");
+    try network_test_utils.requireEnvEnabled(allocator, "LIBLINK_NETWORK_SFTP_E2E");
 
-    const tmp_root = try std.fmt.allocPrint(allocator, "/tmp/syslink-net-sftp-e2e-{}", .{std.time.nanoTimestamp()});
+    const tmp_root = try std.fmt.allocPrint(allocator, "/tmp/liblink-net-sftp-e2e-{}", .{std.time.nanoTimestamp()});
     defer allocator.free(tmp_root);
     defer std.fs.cwd().deleteTree(tmp_root) catch {};
     try std.fs.cwd().makePath(tmp_root);
@@ -83,13 +83,13 @@ test "Integration: network SFTP subsystem e2e" {
     var sftp_channel = try client.openSftp();
     defer sftp_channel.getSession().close() catch {};
 
-    var sftp_client = try syslink.sftp.SftpClient.init(allocator, sftp_channel);
+    var sftp_client = try liblink.sftp.SftpClient.init(allocator, sftp_channel);
     defer sftp_client.deinit();
 
-    try sftp_client.mkdir("/docs", syslink.sftp.attributes.FileAttributes.init());
+    try sftp_client.mkdir("/docs", liblink.sftp.attributes.FileAttributes.init());
 
-    const open_flags = syslink.sftp.protocol.OpenFlags{ .read = true, .write = true, .creat = true, .trunc = true };
-    var handle = try sftp_client.open("/docs/hello.txt", open_flags, syslink.sftp.attributes.FileAttributes.init());
+    const open_flags = liblink.sftp.protocol.OpenFlags{ .read = true, .write = true, .creat = true, .trunc = true };
+    var handle = try sftp_client.open("/docs/hello.txt", open_flags, liblink.sftp.attributes.FileAttributes.init());
     defer handle.deinit(allocator);
 
     try sftp_client.write(handle, 0, "hello-net-sftp");
