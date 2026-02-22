@@ -77,7 +77,7 @@ Implements [draft-denis-ssh-quic](https://datatracker.ietf.org/doc/html/draft-de
 
 ## References
 
-- [draft-denis-ssh-quic](https://datatracker.ietf.org/doc/html/draft-denis-ssh-quic)
+- [draft-bider-ssh-quic](https://datatracker.ietf.org/doc/draft-bider-ssh-quic/)
 - [SSH Protocol (RFC 4251-4254)](https://www.rfc-editor.org/rfc/rfc4251.html)
 - [SFTP Protocol](https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02)
 - [QUIC (RFC 9000)](https://www.rfc-editor.org/rfc/rfc9000.html)

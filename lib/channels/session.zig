@@ -23,9 +23,7 @@ pub const SessionChannel = struct {
     pub fn open(allocator: Allocator, manager: *ChannelManager) !Self {
         const stream_id = try manager.openChannel(
             "session",
-            2 * 1024 * 1024, // 2MB initial window size
-            32 * 1024, // 32KB max packet size
-            "", // No type-specific data for session
+            "",
         );
 
         return Self{

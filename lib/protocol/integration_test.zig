@@ -14,9 +14,6 @@ test "integration - channel open packet on correct stream" {
     // Create a channel open message
     const ch_open = channel.ChannelOpen{
         .channel_type = "session",
-        .sender_channel = 42,
-        .initial_window_size = 2097152,
-        .maximum_packet_size = 32768,
         .type_specific_data = "",
     };
 

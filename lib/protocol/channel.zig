@@ -60,34 +60,28 @@ pub const Channel = struct {
     }
 };
 
-/// SSH_MSG_CHANNEL_OPEN (modified format for SSH/QUIC per Section 6.8)
+/// SSH_MSG_CHANNEL_OPEN (SSH/QUIC format per draft-bider-ssh-quic-09 Section 6.8)
+///
+/// No sender channel or flow control fields — QUIC stream ID is the channel
+/// identifier and QUIC handles flow control.
 ///
 /// Format:
 ///   byte      SSH_MSG_CHANNEL_OPEN
 ///   string    channel type
-///   uint32    sender channel
-///   uint32    initial window size
-///   uint32    maximum packet size
 ///   ....      channel type specific data follows
 pub const ChannelOpen = struct {
     channel_type: []const u8,
-    sender_channel: u32,
-    initial_window_size: u32,
-    maximum_packet_size: u32,
     type_specific_data: []const u8,
 
     /// Encode SSH_MSG_CHANNEL_OPEN
     pub fn encode(self: *const ChannelOpen, allocator: Allocator) ![]u8 {
-        const size = 1 + 4 + self.channel_type.len + 4 + 4 + 4 + self.type_specific_data.len;
+        const size = 1 + 4 + self.channel_type.len + self.type_specific_data.len;
         const buffer = try allocator.alloc(u8, size);
         errdefer allocator.free(buffer);
 
         var writer = wire.Writer{ .buffer = buffer };
         try writer.writeByte(constants.SSH_MSG.CHANNEL_OPEN);
         try writer.writeString(self.channel_type);
-        try writer.writeUint32(self.sender_channel);
-        try writer.writeUint32(self.initial_window_size);
-        try writer.writeUint32(self.maximum_packet_size);
         @memcpy(buffer[buffer.len - self.type_specific_data.len ..], self.type_specific_data);
 
         return buffer;
@@ -105,19 +99,11 @@ pub const ChannelOpen = struct {
         const channel_type = try reader.readString(allocator);
         errdefer allocator.free(channel_type);
 
-        const sender_channel = try reader.readUint32();
-        const initial_window_size = try reader.readUint32();
-        const maximum_packet_size = try reader.readUint32();
-
-        // Remaining bytes are type-specific data
         const remaining = data[reader.offset..];
         const type_specific_data = try allocator.dupe(u8, remaining);
 
         return ChannelOpen{
             .channel_type = channel_type,
-            .sender_channel = sender_channel,
-            .initial_window_size = initial_window_size,
-            .maximum_packet_size = maximum_packet_size,
             .type_specific_data = type_specific_data,
         };
     }
@@ -129,58 +115,38 @@ pub const ChannelOpen = struct {
     }
 };
 
-/// SSH_MSG_CHANNEL_OPEN_CONFIRMATION (modified format for SSH/QUIC)
+/// SSH_MSG_CHANNEL_OPEN_CONFIRMATION (SSH/QUIC format per draft-bider-ssh-quic-09 Section 6.8)
 ///
-/// No recipient channel field (QUIC stream ID serves this purpose)
+/// No channel ID or flow control fields — QUIC handles both.
 ///
 /// Format:
 ///   byte      SSH_MSG_CHANNEL_OPEN_CONFIRMATION
-///   uint32    sender channel
-///   uint32    initial window size
-///   uint32    maximum packet size
 ///   ....      channel type specific data
 pub const ChannelOpenConfirmation = struct {
-    sender_channel: u32,
-    initial_window_size: u32,
-    maximum_packet_size: u32,
     type_specific_data: []const u8,
 
     /// Encode SSH_MSG_CHANNEL_OPEN_CONFIRMATION
     pub fn encode(self: *const ChannelOpenConfirmation, allocator: Allocator) ![]u8 {
-        const size = 1 + 4 + 4 + 4 + self.type_specific_data.len;
+        const size = 1 + self.type_specific_data.len;
         const buffer = try allocator.alloc(u8, size);
         errdefer allocator.free(buffer);
 
-        var writer = wire.Writer{ .buffer = buffer };
-        try writer.writeByte(constants.SSH_MSG.CHANNEL_OPEN_CONFIRMATION);
-        try writer.writeUint32(self.sender_channel);
-        try writer.writeUint32(self.initial_window_size);
-        try writer.writeUint32(self.maximum_packet_size);
-        @memcpy(buffer[buffer.len - self.type_specific_data.len ..], self.type_specific_data);
+        buffer[0] = constants.SSH_MSG.CHANNEL_OPEN_CONFIRMATION;
+        @memcpy(buffer[1..], self.type_specific_data);
 
         return buffer;
     }
 
     /// Decode SSH_MSG_CHANNEL_OPEN_CONFIRMATION
     pub fn decode(allocator: Allocator, data: []const u8) !ChannelOpenConfirmation {
-        var reader = wire.Reader{ .buffer = data };
-
-        const msg_type = try reader.readByte();
-        if (msg_type != constants.SSH_MSG.CHANNEL_OPEN_CONFIRMATION) {
+        if (data.len < 1) return error.InsufficientData;
+        if (data[0] != constants.SSH_MSG.CHANNEL_OPEN_CONFIRMATION) {
             return error.InvalidMessageType;
         }
 
-        const sender_channel = try reader.readUint32();
-        const initial_window_size = try reader.readUint32();
-        const maximum_packet_size = try reader.readUint32();
-
-        const remaining = data[reader.offset..];
-        const type_specific_data = try allocator.dupe(u8, remaining);
+        const type_specific_data = try allocator.dupe(u8, data[1..]);
 
         return ChannelOpenConfirmation{
-            .sender_channel = sender_channel,
-            .initial_window_size = initial_window_size,
-            .maximum_packet_size = maximum_packet_size,
             .type_specific_data = type_specific_data,
         };
     }
@@ -525,9 +491,6 @@ test "ChannelOpen - encode and decode" {
 
     const msg = ChannelOpen{
         .channel_type = "session",
-        .sender_channel = 42,
-        .initial_window_size = 2097152,
-        .maximum_packet_size = 32768,
         .type_specific_data = "",
     };
 
@@ -538,9 +501,7 @@ test "ChannelOpen - encode and decode" {
     defer decoded.deinit(allocator);
 
     try testing.expectEqualStrings(msg.channel_type, decoded.channel_type);
-    try testing.expectEqual(msg.sender_channel, decoded.sender_channel);
-    try testing.expectEqual(msg.initial_window_size, decoded.initial_window_size);
-    try testing.expectEqual(msg.maximum_packet_size, decoded.maximum_packet_size);
+    try testing.expectEqualStrings(msg.type_specific_data, decoded.type_specific_data);
 }
 
 test "ChannelOpenConfirmation - encode and decode" {
@@ -548,21 +509,18 @@ test "ChannelOpenConfirmation - encode and decode" {
     const allocator = testing.allocator;
 
     const msg = ChannelOpenConfirmation{
-        .sender_channel = 99,
-        .initial_window_size = 1048576,
-        .maximum_packet_size = 16384,
         .type_specific_data = "",
     };
 
     const encoded = try msg.encode(allocator);
     defer allocator.free(encoded);
 
+    try testing.expectEqual(@as(usize, 1), encoded.len);
+
     var decoded = try ChannelOpenConfirmation.decode(allocator, encoded);
     defer decoded.deinit(allocator);
 
-    try testing.expectEqual(msg.sender_channel, decoded.sender_channel);
-    try testing.expectEqual(msg.initial_window_size, decoded.initial_window_size);
-    try testing.expectEqual(msg.maximum_packet_size, decoded.maximum_packet_size);
+    try testing.expectEqualStrings(msg.type_specific_data, decoded.type_specific_data);
 }
 
 test "ChannelOpenFailure - encode and decode" {
