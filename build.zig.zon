@@ -1,6 +1,6 @@
 .{
     .name = .liblink,
-    .version = "0.0.2",
+    .version = "0.0.3",
     .dependencies = .{
         .libfast = .{
             .url = "https://github.com/bresilla/libfast/archive/refs/tags/0.0.5.tar.gz",

@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.0.3] - 2026-02-22
+
+### <!-- 0 -->⛰️  Features
+
+- Improve channel session and PTY handling
+- Refactor authentication to exclusively use public keys
+- Add host endpoint formatting and known-hosts path-scoped helpers
+- Add strict and accept-new host trust policy options
+- Add known-hosts trust workflow for client connections
+- Add library user identity primitives and apply privilege drop
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Unblock release build in session channel acceptance
+- Harden server-side session channel acceptance
+
+### <!-- 2 -->🚜 Refactor
+
+- Rename project to liblink
+- Share server-ready checks across network e2e
+- Share channel request string decode helper
+- Share network channel request wait helper
+- Standardize network e2e constants and seeds
+- Share authenticated server thread startup helper
+- Share network server thread context primitives
+- Share authenticated network client helper
+- Centralize network e2e server bootstrap flow
+- Share env gating and readiness helpers for e2e
+- Deduplicate network e2e test scaffolding
+- Share network session-channel test helper
+- Move exec output collection into channels workflow
+- Move endpoint parsing into reusable network module
+- Move high-level sftp file operations into library workflow
+- Move client auth fallback flow into library module
+- Move daemon pid lifecycle helpers into library
+- Move server session runtime from sl binary into library
+
+### <!-- 6 -->🧪 Testing
+
+- Add packet-level coverage for exec output workflow
+- Add deterministic network exec e2e assertions
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Rename runquic to libfast in package
+
 ## [0.0.2] - 2026-02-17
 
 ### <!-- 0 -->⛰️  Features
