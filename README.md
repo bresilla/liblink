@@ -67,7 +67,7 @@ examples/
 
 ## Protocol
 
-Implements [draft-denis-ssh-quic](https://datatracker.ietf.org/doc/html/draft-denis-ssh-quic) with:
+Implements [draft-bider-ssh-quic](https://datatracker.ietf.org/doc/draft-bider-ssh-quic/) with:
 
 - Ed25519 signatures, X25519 key exchange, HKDF-SHA256
 - QUIC stream multiplexing (SSH channels map to QUIC streams)
