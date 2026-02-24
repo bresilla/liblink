@@ -73,6 +73,7 @@ pub const ClientConnection = struct {
     transport: *quic_transport.QuicTransport,
     kex: kex_exchange.ClientKeyExchange,
     channel_manager: channels.ChannelManager,
+    socket: std.posix.socket_t,
 
     const Self = @This();
 
@@ -156,6 +157,7 @@ pub const ClientConnection = struct {
             .transport = transport,
             .kex = kex,
             .channel_manager = channel_manager,
+            .socket = udp_transport.socket.socket,
         };
     }
 
@@ -164,6 +166,7 @@ pub const ClientConnection = struct {
         self.transport.deinit();
         self.allocator.destroy(self.transport);
         self.kex.deinit();
+        std.posix.close(self.socket);
     }
 
     /// Open a new SSH channel (maps to QUIC stream)
@@ -418,6 +421,7 @@ pub const ServerConnection = struct {
     transport: quic_transport.QuicTransport,
     kex: kex_exchange.ServerKeyExchange,
     channel_manager: channels.ChannelManager,
+    socket: ?std.posix.socket_t = null,
 
     const Self = @This();
 
@@ -425,6 +429,7 @@ pub const ServerConnection = struct {
         self.channel_manager.deinit();
         self.transport.deinit();
         self.kex.deinit();
+        if (self.socket) |s| std.posix.close(s);
     }
 
     /// Accept a new channel opened by client
@@ -702,8 +707,26 @@ pub const ConnectionListener = struct {
         const local_conn_id = result.server_connection_id;
         const remote_conn_id = result.client_connection_id;
 
-        // Set client address for server socket (for sendto)
-        self.udp_transport.socket.address = init_result.client_address;
+        // Create a per-connection UDP socket connected to this specific client.
+        // The kernel routes packets from this client to the connected socket,
+        // keeping the listener socket free for new clients.
+        const conn_socket = try std.posix.socket(
+            init_result.client_address.any.family,
+            std.posix.SOCK.DGRAM,
+            std.posix.IPPROTO.UDP,
+        );
+        errdefer std.posix.close(conn_socket);
+
+        const reuse: u32 = 1;
+        try std.posix.setsockopt(conn_socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&reuse));
+        try std.posix.setsockopt(conn_socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, std.mem.asBytes(&reuse));
+
+        // Bind to same address as listener
+        const listen_addr = self.udp_transport.socket.address;
+        try std.posix.bind(conn_socket, &listen_addr.any, listen_addr.getOsSockLen());
+
+        // Connect to client — this filters incoming packets to only this client
+        try std.posix.connect(conn_socket, &init_result.client_address.any, init_result.client_address.getOsSockLen());
 
         // Prepare client address for server transport (convert Address to sockaddr.storage)
         var client_storage: std.posix.sockaddr.storage = undefined;
@@ -712,7 +735,7 @@ pub const ConnectionListener = struct {
 
         var transport = try quic_transport.QuicTransport.init(
             self.allocator,
-            self.udp_transport.socket.socket, // Reuse UDP socket
+            conn_socket, // Per-connection socket
             local_conn_id,
             remote_conn_id,
             result.client_secret,
@@ -731,6 +754,7 @@ pub const ConnectionListener = struct {
             .transport = transport,
             .kex = kex,
             .channel_manager = undefined, // Initialize after transport is in place
+            .socket = conn_socket,
         };
 
         // Initialize channel manager with pointer to conn.transport (not local variable!)

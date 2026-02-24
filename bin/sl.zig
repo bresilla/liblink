@@ -160,6 +160,11 @@ fn handleSession(server_conn: *liblink.connection.ServerConnection, authenticate
 }
 
 fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (std.os.linux.getuid() == 0) {
+        std.debug.print("Error: sl server must not run as root\n", .{});
+        return error.RunningAsRoot;
+    }
+
     var listen_addr: []const u8 = "0.0.0.0";
     var listen_port: u16 = 2222;
     var daemon_mode = false;
@@ -308,86 +313,111 @@ fn serverStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     std.debug.print("Ready for connections. Press Ctrl+C to stop.\n\n", .{});
 
-    // Install signal handler for graceful shutdown
-    should_exit.store(false, .release);
+    // Use default signal behavior — Ctrl+C kills the server immediately
     var act = std.posix.Sigaction{
-        .handler = .{ .handler = handleSigInt },
+        .handler = .{ .handler = std.posix.SIG.DFL },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
     std.posix.sigaction(std.posix.SIG.TERM, &act, null);
 
-    // Server loop
+    // Auto-reap child processes (no zombies)
+    var sa_chld = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.NOCLDWAIT,
+    };
+    std.posix.sigaction(std.posix.SIG.CHLD, &sa_chld, null);
+
+    // Server loop — fork per connection (like sshd)
     var client_count: usize = 0;
     while (true) {
-        if (should_exit.load(.acquire)) break;
-
-        var server_conn = listener.acceptConnection() catch |err| {
+        const server_conn = listener.acceptConnection() catch |err| {
             if (err == error.WouldBlock) {
-                // No connection ready, wait before trying again
                 std.Thread.sleep(100 * std.time.ns_per_ms);
                 continue;
             }
-            // PacketTooSmall often happens during connection teardown (cleanup packets)
-            // These are benign and can be safely ignored
             if (err == error.PacketTooSmall) {
                 continue;
             }
             std.debug.print("✗ Failed to accept connection: {}\n\n", .{err});
             continue;
         };
-        defer server_conn.deinit();
 
         client_count += 1;
-        std.debug.print("--- Client #{d} ---\n", .{client_count});
 
-        std.debug.print("✓ Client connected\n", .{});
-
-        // Handle authentication - public key only
-        const Validators = struct {
-            fn keyValidator(user: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
-                std.debug.print("  → Checking public key for user '{s}' (algorithm: {s})\n", .{ user, algorithm });
-
-                if (liblink.auth.system.validatePublicKey(user, algorithm, public_key_blob)) {
-                    std.debug.print("  ✓ Public key authenticated\n", .{});
-                    return true;
-                }
-
-                std.debug.print("  ✗ Public key not found in authorized_keys\n", .{});
-                return false;
-            }
-        };
-
-        const authenticated_user = server_conn.handleAuthenticationIdentity(
-            Validators.keyValidator,
-        ) catch |err| {
-            std.debug.print("✗ Authentication error: {}\n\n", .{err});
-            continue;
-        };
-
-        if (authenticated_user == null) {
-            std.debug.print("✗ Authentication failed\n\n", .{});
+        const pid = std.c.fork();
+        if (pid < 0) {
+            std.debug.print("✗ Fork failed\n\n", .{});
+            listener.removeConnection(server_conn);
             continue;
         }
-        const user = authenticated_user.?;
-        defer allocator.free(user);
 
-        std.debug.print("✓ Client authenticated as {s}\n", .{user});
+        if (pid == 0) {
+            // Child process — handle this connection, then exit
+            handleConnectionChild(allocator, server_conn, client_count);
+            std.c._exit(0);
+        }
 
-        // Handle session channels
-        handleSession(server_conn, user) catch |err| {
-            std.debug.print("✗ Session error: {}\n\n", .{err});
-            continue;
-        };
-
-        std.debug.print("Session ended\n\n", .{});
+        // Parent — close the per-connection socket, keep accepting
+        // The child owns the connection now; just drop our reference
+        if (server_conn.socket) |s| {
+            std.posix.close(s);
+            server_conn.socket = null;
+        }
     }
 
     if (foreground_internal) {
         liblink.server.daemon.removePidFile(allocator);
     }
     std.debug.print("Server stopped\n", .{});
+}
+
+fn handleConnectionChild(
+    allocator: std.mem.Allocator,
+    server_conn: *liblink.connection.ServerConnection,
+    client_num: usize,
+) void {
+    std.debug.print("--- Client #{d} (pid {}) ---\n", .{ client_num, std.c.getpid() });
+    std.debug.print("✓ Client connected\n", .{});
+
+    const Validators = struct {
+        fn keyValidator(user: []const u8, algorithm: []const u8, public_key_blob: []const u8) bool {
+            std.debug.print("  → Checking public key for user '{s}' (algorithm: {s})\n", .{ user, algorithm });
+
+            if (liblink.auth.system.validatePublicKey(user, algorithm, public_key_blob)) {
+                std.debug.print("  ✓ Public key authenticated\n", .{});
+                return true;
+            }
+
+            std.debug.print("  ✗ Public key not found in authorized_keys\n", .{});
+            return false;
+        }
+    };
+
+    const authenticated_user = server_conn.handleAuthenticationIdentity(
+        Validators.keyValidator,
+    ) catch |err| {
+        std.debug.print("✗ Authentication error: {}\n\n", .{err});
+        return;
+    };
+
+    if (authenticated_user == null) {
+        std.debug.print("✗ Authentication failed\n\n", .{});
+        return;
+    }
+    const user = authenticated_user.?;
+    defer allocator.free(user);
+
+    std.debug.print("✓ Client authenticated as {s}\n", .{user});
+
+    handleSession(server_conn, user) catch |err| {
+        std.debug.print("✗ Session error: {}\n\n", .{err});
+        return;
+    };
+
+    std.debug.print("Session ended for client #{d}\n\n", .{client_num});
 }
 
 fn serverStop(allocator: std.mem.Allocator) !void {
@@ -1101,4 +1131,4 @@ fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![
 
     return blob;
 }
-// Clean build
+
