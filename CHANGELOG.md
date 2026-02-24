@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.7] - 2026-02-24
+
+### <!-- 3 -->📚 Documentation
+
+- Add comprehensive documentation for CLI, library, and protocol
+
 ## [0.0.6] - 2026-02-24
 
 ### <!-- 1 -->🐛 Bug Fixes
