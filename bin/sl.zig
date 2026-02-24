@@ -642,6 +642,7 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.process.exit(1);
     };
     defer {
+        session.sendEof() catch {};
         session.close() catch {};
     }
 

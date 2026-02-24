@@ -34,7 +34,26 @@ const PtySession = struct {
     allocator: std.mem.Allocator,
 
     fn deinit(self: *PtySession) void {
-        _ = std.posix.waitpid(self.pid, std.c.W.NOHANG);
+        // Send SIGTERM so the child shell exits cleanly
+        std.posix.kill(self.pid, std.posix.SIG.TERM) catch {};
+
+        // Give the process a moment to exit gracefully
+        var exited = false;
+        for (0..10) |_| {
+            const wait_result = std.posix.waitpid(self.pid, std.c.W.NOHANG);
+            if (wait_result.pid != 0) {
+                exited = true;
+                break;
+            }
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+
+        // Force kill if still running
+        if (!exited) {
+            std.posix.kill(self.pid, std.posix.SIG.KILL) catch {};
+            _ = std.posix.waitpid(self.pid, 0);
+        }
+
         self.pty.deinit();
         self.allocator.destroy(self.pty);
     }
