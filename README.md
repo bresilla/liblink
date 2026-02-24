@@ -9,36 +9,41 @@ zig build
 zig build test
 ```
 
-## Usage
+## Quick Start
 
 ```bash
+# Generate server host key
+ssh-keygen -t ed25519 -f ~/.ssh/sl_host_key -N ""
+
 # Start server
-sl server start
-sl server start -p 2222 --daemon
+sl server start -k ~/.ssh/sl_host_key
 
 # Remote shell
-sl shell user@host:2222
+sl shell -i ~/.ssh/id_ed25519 user@host:2222
 
 # Execute command
-sl exec user@host "ls -la"
+sl exec -i ~/.ssh/id_ed25519 user@host "ls -la"
 
 # SFTP session
-sl sftp user@host
+sl sftp -i ~/.ssh/id_ed25519 user@host
 ```
 
 ## Library
 
 ```zig
-const std = @import("std");
 const liblink = @import("liblink");
 
 // Connect
-var conn = try liblink.connection.connectClient(allocator, "host", 2222, random);
+var conn = try liblink.connection.connectClientTrusted(allocator, "host", 2222, random, .accept_new);
 defer conn.deinit();
+
+// Authenticate
+try liblink.auth.workflow.authenticateClient(allocator, &conn, "user", .{
+    .identity_path = "/home/user/.ssh/id_ed25519",
+});
 
 // Execute
 var session = try conn.requestExec("uptime");
-defer session.close() catch {};
 
 // SFTP
 var sftp_channel = try conn.openSftp();
@@ -50,30 +55,39 @@ var sftp = try liblink.sftp.SftpClient.init(allocator, sftp_channel);
 ```
 lib/
   liblink.zig        Entry point
-  connection.zig     Connection management
-  auth/              Authentication
-  channels/          SSH channels
-  crypto/            Cryptographic primitives
-  kex/               Key exchange
-  network/           Networking (UDP)
-  protocol/          Protocol messages
-  sftp/              SFTP implementation
+  connection.zig     Client/server connection API
+  auth/              Authentication (public key, system users)
+  channels/          SSH session channels (shell, exec, subsystem)
+  crypto/            Cryptographic primitives (Ed25519, X25519, AES-GCM)
+  kex/               Key exchange state machines
+  network/           UDP and QUIC transport
+  protocol/          Wire format encoding/decoding
+  platform/          PTY allocation, user lookup
+  server/            Server daemon and session runtime
+  sftp/              SFTP v3 client and server
 bin/
   sl.zig             CLI tool
 examples/
-  client_demo.zig
-  server_demo.zig
+  client_demo.zig    Client usage example
+  server_demo.zig    Server usage example
 ```
+
+## Documentation
+
+- **[CLI Reference](bin/README.md)** - `sl` command usage, server setup, client options
+- **[Library API](docs/library.md)** - Using liblink as a Zig dependency
+- **[Protocol](docs/protocol.md)** - SSH/QUIC protocol details, key exchange, authentication flow
 
 ## Protocol
 
-Implements [draft-bider-ssh-quic](https://datatracker.ietf.org/doc/draft-bider-ssh-quic/) with:
+Implements [draft-bider-ssh-quic](https://datatracker.ietf.org/doc/draft-bider-ssh-quic/):
 
-- Ed25519 signatures, X25519 key exchange, HKDF-SHA256
-- QUIC stream multiplexing (SSH channels map to QUIC streams)
-- SSH authentication (public key)
-- SFTP v3 client and server
-- Session channels (shell, exec, subsystem)
+- Key exchange over UDP, then encrypted QUIC transport
+- Ed25519 signatures, X25519 ECDH, AES-256-GCM, HKDF-SHA256
+- SSH channels map 1:1 to QUIC streams (no head-of-line blocking)
+- Public key authentication against `~/.ssh/authorized_keys`
+- SFTP v3 file transfer
+- Session channels (interactive shell, remote exec, subsystem)
 
 ## References
 
