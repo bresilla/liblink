@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.5] - 2026-02-24
+
+### <!-- 0 -->⛰️  Features
+
+- Implement server forking for concurrent clients
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Update SSH-QUIC draft reference
+
 ## [0.0.4] - 2026-02-22
 
 ### <!-- 0 -->⛰️  Features
