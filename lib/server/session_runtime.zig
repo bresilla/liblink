@@ -404,18 +404,37 @@ pub const SessionRuntime = struct {
         const flags = try std.posix.fcntl(p.master_fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(p.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
 
+        // Track last time we saw any activity from the client.
+        // When the client dies abruptly (terminal closed), we stop receiving
+        // QUIC packets. If the shell is idle too, we need this timeout to
+        // detect the dead connection and clean up.
+        var last_client_activity = std.time.milliTimestamp();
+        const idle_timeout_ms: i64 = 120_000; // 2 minutes
+
+        var exit_reason: []const u8 = "unknown";
+
         while (true) {
             server_conn.transport.poll(1) catch {};
 
             const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch 0;
             if (channel_len > 0) {
+                last_client_activity = std.time.milliTimestamp();
                 const data = channel_buffer[0..channel_len];
 
                 if (data.len > 0 and data[0] == 94) {
                     var channel_data = channel_protocol.ChannelData.decode(self.allocator, data) catch continue;
                     defer channel_data.deinit(self.allocator);
-                    _ = p.write(channel_data.data) catch break;
+                    _ = p.write(channel_data.data) catch {
+                        exit_reason = "pty write failed";
+                        break;
+                    };
                 } else if (data.len > 0 and data[0] == 96) {
+                    // SSH_MSG_CHANNEL_EOF
+                    exit_reason = "client sent EOF";
+                    break;
+                } else if (data.len > 0 and data[0] == 97) {
+                    // SSH_MSG_CHANNEL_CLOSE
+                    exit_reason = "client sent channel close";
                     break;
                 }
             }
@@ -424,18 +443,36 @@ pub const SessionRuntime = struct {
                 if (err == error.WouldBlock) {
                     // Check if child process has exited
                     const wait_result = std.posix.waitpid(session.pid, std.c.W.NOHANG);
-                    if (wait_result.pid != 0) break; // child exited
+                    if (wait_result.pid != 0) {
+                        exit_reason = "child process exited";
+                        break;
+                    }
+
+                    // Check for client idle timeout (dead client detection)
+                    if (std.time.milliTimestamp() - last_client_activity > idle_timeout_ms) {
+                        exit_reason = "client idle timeout";
+                        break;
+                    }
                     continue;
                 }
-                server_conn.channel_manager.sendEof(stream_id) catch {};
-                server_conn.channel_manager.closeChannel(stream_id) catch {};
+                exit_reason = "pty read error";
                 break;
             };
 
-            if (pty_len == 0) break; // EOF — child exited
+            if (pty_len == 0) {
+                exit_reason = "pty EOF (child exited)";
+                break;
+            }
 
-            try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
+            // Send PTY output to client. If the client is dead, the QUIC
+            // send window fills up and this returns ConnectionStalled after ~30s.
+            server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]) catch {
+                exit_reason = "send to client failed (client likely disconnected)";
+                break;
+            };
         }
+
+        std.log.info("Session closing: {s}", .{exit_reason});
 
         server_conn.channel_manager.sendEof(stream_id) catch {};
         server_conn.channel_manager.closeChannel(stream_id) catch {};
