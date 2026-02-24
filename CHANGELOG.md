@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.6] - 2026-02-24
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Use standard known_hosts file path
+
 ## [0.0.5] - 2026-02-24
 
 ### <!-- 0 -->⛰️  Features

@@ -7,7 +7,7 @@ pub fn defaultPath(allocator: std.mem.Allocator) ![]u8 {
     };
     defer allocator.free(home);
 
-    return std.fmt.allocPrint(allocator, "{s}/.ssh/liblink_known_hosts", .{home});
+    return std.fmt.allocPrint(allocator, "{s}/.ssh/known_hosts", .{home});
 }
 
 pub fn hostKeyForEndpoint(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
