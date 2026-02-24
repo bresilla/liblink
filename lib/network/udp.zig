@@ -62,6 +62,11 @@ pub const UdpSocket = struct {
         );
         errdefer std.posix.close(socket);
 
+        // Allow per-connection sockets to bind to the same address
+        const reuse_addr: u32 = 1;
+        try std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, std.mem.asBytes(&reuse_addr));
+        try std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, std.mem.asBytes(&reuse_addr));
+
         // Bind to address
         try std.posix.bind(socket, &address.any, address.getOsSockLen());
 
@@ -260,26 +265,40 @@ pub const KeyExchangeTransport = struct {
 
     /// Receive SSH_QUIC_INIT (server)
     ///
-    /// Blocks until init is received from a client
+    /// Blocks until a valid init is received from a client.
+    /// Silently drops stale/garbage packets (e.g. from old QUIC connections).
     /// Returns init data and client address. Caller owns init data memory.
     pub fn receiveInit(self: *Self) !struct {
         init_data: []u8,
         client_address: Address,
     } {
+        const constants = @import("../common/constants.zig");
         // Max SSH_QUIC_INIT size (typically 1200-1500 bytes per spec)
         const max_size = 2048;
+        // SSH_QUIC_INIT must be padded to at least 1200 bytes
+        const min_init_size = 1200;
 
-        const result = try self.socket.receiveFrom(max_size);
+        while (true) {
+            const result = try self.socket.receiveFrom(max_size);
 
-        std.log.info("Received SSH_QUIC_INIT from {any} ({any} bytes)", .{
-            result.sender,
-            result.data.len,
-        });
+            // Validate: must be at least 1200 bytes and start with type byte 0x01
+            if (result.data.len < min_init_size or
+                result.data[0] != @intFromEnum(constants.PacketType.ssh_quic_init))
+            {
+                self.allocator.free(result.data);
+                continue; // Drop stale/invalid packet, wait for real init
+            }
 
-        return .{
-            .init_data = result.data,
-            .client_address = result.sender,
-        };
+            std.log.info("Received SSH_QUIC_INIT from {any} ({any} bytes)", .{
+                result.sender,
+                result.data.len,
+            });
+
+            return .{
+                .init_data = result.data,
+                .client_address = result.sender,
+            };
+        }
     }
 
     /// Send SSH_QUIC_REPLY (server)
