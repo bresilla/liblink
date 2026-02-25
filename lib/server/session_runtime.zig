@@ -34,7 +34,26 @@ const PtySession = struct {
     allocator: std.mem.Allocator,
 
     fn deinit(self: *PtySession) void {
-        _ = std.posix.waitpid(self.pid, std.c.W.NOHANG);
+        // Send SIGTERM so the child shell exits cleanly
+        std.posix.kill(self.pid, std.posix.SIG.TERM) catch {};
+
+        // Give the process a moment to exit gracefully
+        var exited = false;
+        for (0..10) |_| {
+            const wait_result = std.posix.waitpid(self.pid, std.c.W.NOHANG);
+            if (wait_result.pid != 0) {
+                exited = true;
+                break;
+            }
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+
+        // Force kill if still running
+        if (!exited) {
+            std.posix.kill(self.pid, std.posix.SIG.KILL) catch {};
+            _ = std.posix.waitpid(self.pid, 0);
+        }
+
         self.pty.deinit();
         self.allocator.destroy(self.pty);
     }
@@ -385,18 +404,59 @@ pub const SessionRuntime = struct {
         const flags = try std.posix.fcntl(p.master_fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(p.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
 
-        while (true) {
-            server_conn.transport.poll(1) catch {};
+        // Keepalive probing for dead-client detection.
+        // When idle, the server periodically sends a QUIC PING.  If the
+        // client is dead the UDP packet provokes ICMP port-unreachable,
+        // which poll() surfaces as ConnectionRefused on the next recv.
+        var last_client_activity = std.time.milliTimestamp();
+        var last_keepalive_sent = std.time.milliTimestamp();
+        const keepalive_interval_ms: i64 = 15_000; // probe every 15s
 
-            const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch 0;
+        var exit_reason: []const u8 = "unknown";
+
+        bridge: while (true) {
+            // Poll for incoming QUIC packets. On a connected UDP socket,
+            // recvfrom returns ConnectionRefused when the peer's port is
+            // closed (ICMP unreachable). This is the fastest signal that
+            // the client died.
+            server_conn.transport.poll(1) catch |err| {
+                if (err == error.ConnectionRefused or
+                    err == error.ConnectionResetByPeer or
+                    err == error.NetworkUnreachable)
+                {
+                    exit_reason = "client disconnected (network error)";
+                    break :bridge;
+                }
+                // Other errors (e.g. WouldBlock already handled inside poll): ignore
+            };
+
+            // Read from the QUIC stream. Don't swallow errors — StreamClosed
+            // and StreamNotFound are real signals that the client is gone.
+            const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch |err| blk: {
+                if (err == error.StreamClosed or err == error.StreamNotFound) {
+                    exit_reason = "client stream closed";
+                    break :bridge;
+                }
+                break :blk @as(usize, 0);
+            };
             if (channel_len > 0) {
+                last_client_activity = std.time.milliTimestamp();
                 const data = channel_buffer[0..channel_len];
 
                 if (data.len > 0 and data[0] == 94) {
                     var channel_data = channel_protocol.ChannelData.decode(self.allocator, data) catch continue;
                     defer channel_data.deinit(self.allocator);
-                    _ = p.write(channel_data.data) catch break;
+                    _ = p.write(channel_data.data) catch {
+                        exit_reason = "pty write failed";
+                        break;
+                    };
                 } else if (data.len > 0 and data[0] == 96) {
+                    // SSH_MSG_CHANNEL_EOF
+                    exit_reason = "client sent EOF";
+                    break;
+                } else if (data.len > 0 and data[0] == 97) {
+                    // SSH_MSG_CHANNEL_CLOSE
+                    exit_reason = "client sent channel close";
                     break;
                 }
             }
@@ -405,18 +465,44 @@ pub const SessionRuntime = struct {
                 if (err == error.WouldBlock) {
                     // Check if child process has exited
                     const wait_result = std.posix.waitpid(session.pid, std.c.W.NOHANG);
-                    if (wait_result.pid != 0) break; // child exited
+                    if (wait_result.pid != 0) {
+                        exit_reason = "child process exited";
+                        break;
+                    }
+
+                    // Keepalive probe: after 15s of silence, send a QUIC
+                    // PING to provoke ICMP if the client is gone.  The
+                    // next poll() iteration picks up ConnectionRefused.
+                    const now = std.time.milliTimestamp();
+                    if (now - last_client_activity > keepalive_interval_ms and
+                        now - last_keepalive_sent > keepalive_interval_ms)
+                    {
+                        server_conn.transport.sendKeepalive() catch {
+                            exit_reason = "keepalive failed (client disconnected)";
+                            break;
+                        };
+                        last_keepalive_sent = now;
+                    }
                     continue;
                 }
-                server_conn.channel_manager.sendEof(stream_id) catch {};
-                server_conn.channel_manager.closeChannel(stream_id) catch {};
+                exit_reason = "pty read error";
                 break;
             };
 
-            if (pty_len == 0) break; // EOF — child exited
+            if (pty_len == 0) {
+                exit_reason = "pty EOF (child exited)";
+                break;
+            }
 
-            try server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]);
+            // Send PTY output to client. If the client is dead, the QUIC
+            // send window fills up and this returns ConnectionStalled after ~30s.
+            server_conn.channel_manager.sendData(stream_id, pty_buffer[0..pty_len]) catch {
+                exit_reason = "send to client failed (client likely disconnected)";
+                break;
+            };
         }
+
+        std.debug.print("Session closing: {s}\n", .{exit_reason});
 
         server_conn.channel_manager.sendEof(stream_id) catch {};
         server_conn.channel_manager.closeChannel(stream_id) catch {};
