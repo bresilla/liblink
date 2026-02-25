@@ -404,19 +404,41 @@ pub const SessionRuntime = struct {
         const flags = try std.posix.fcntl(p.master_fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(p.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
 
-        // Track last time we saw any activity from the client.
-        // When the client dies abruptly (terminal closed), we stop receiving
-        // QUIC packets. If the shell is idle too, we need this timeout to
-        // detect the dead connection and clean up.
+        // Keepalive probing for dead-client detection.
+        // When idle, the server periodically sends a QUIC PING.  If the
+        // client is dead the UDP packet provokes ICMP port-unreachable,
+        // which poll() surfaces as ConnectionRefused on the next recv.
         var last_client_activity = std.time.milliTimestamp();
-        const idle_timeout_ms: i64 = 120_000; // 2 minutes
+        var last_keepalive_sent = std.time.milliTimestamp();
+        const keepalive_interval_ms: i64 = 15_000; // probe every 15s
 
         var exit_reason: []const u8 = "unknown";
 
-        while (true) {
-            server_conn.transport.poll(1) catch {};
+        bridge: while (true) {
+            // Poll for incoming QUIC packets. On a connected UDP socket,
+            // recvfrom returns ConnectionRefused when the peer's port is
+            // closed (ICMP unreachable). This is the fastest signal that
+            // the client died.
+            server_conn.transport.poll(1) catch |err| {
+                if (err == error.ConnectionRefused or
+                    err == error.ConnectionResetByPeer or
+                    err == error.NetworkUnreachable)
+                {
+                    exit_reason = "client disconnected (network error)";
+                    break :bridge;
+                }
+                // Other errors (e.g. WouldBlock already handled inside poll): ignore
+            };
 
-            const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch 0;
+            // Read from the QUIC stream. Don't swallow errors — StreamClosed
+            // and StreamNotFound are real signals that the client is gone.
+            const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch |err| blk: {
+                if (err == error.StreamClosed or err == error.StreamNotFound) {
+                    exit_reason = "client stream closed";
+                    break :bridge;
+                }
+                break :blk @as(usize, 0);
+            };
             if (channel_len > 0) {
                 last_client_activity = std.time.milliTimestamp();
                 const data = channel_buffer[0..channel_len];
@@ -448,10 +470,18 @@ pub const SessionRuntime = struct {
                         break;
                     }
 
-                    // Check for client idle timeout (dead client detection)
-                    if (std.time.milliTimestamp() - last_client_activity > idle_timeout_ms) {
-                        exit_reason = "client idle timeout";
-                        break;
+                    // Keepalive probe: after 15s of silence, send a QUIC
+                    // PING to provoke ICMP if the client is gone.  The
+                    // next poll() iteration picks up ConnectionRefused.
+                    const now = std.time.milliTimestamp();
+                    if (now - last_client_activity > keepalive_interval_ms and
+                        now - last_keepalive_sent > keepalive_interval_ms)
+                    {
+                        server_conn.transport.sendKeepalive() catch {
+                            exit_reason = "keepalive failed (client disconnected)";
+                            break;
+                        };
+                        last_keepalive_sent = now;
                     }
                     continue;
                 }
@@ -472,7 +502,7 @@ pub const SessionRuntime = struct {
             };
         }
 
-        std.log.info("Session closing: {s}", .{exit_reason});
+        std.debug.print("Session closing: {s}\n", .{exit_reason});
 
         server_conn.channel_manager.sendEof(stream_id) catch {};
         server_conn.channel_manager.closeChannel(stream_id) catch {};

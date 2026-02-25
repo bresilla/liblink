@@ -57,11 +57,15 @@ pub const QuicTransport = struct {
     pub fn poll(self: *Self, timeout_ms: u32) !void {
         return self.inner.poll(timeout_ms);
     }
+
+    pub fn sendKeepalive(self: *Self) !void {
+        return self.inner.sendKeepalive();
+    }
 };
 
 comptime {
     const T = libfast_transport.QuicTransport;
-    if (!@hasDecl(T, "init") or !@hasDecl(T, "openStream") or !@hasDecl(T, "closeStream") or !@hasDecl(T, "sendOnStream") or !@hasDecl(T, "receiveFromStream") or !@hasDecl(T, "poll") or !@hasDecl(T, "deinit")) {
+    if (!@hasDecl(T, "init") or !@hasDecl(T, "openStream") or !@hasDecl(T, "closeStream") or !@hasDecl(T, "sendOnStream") or !@hasDecl(T, "receiveFromStream") or !@hasDecl(T, "poll") or !@hasDecl(T, "sendKeepalive") or !@hasDecl(T, "deinit")) {
         @compileError("libfast_transport.QuicTransport no longer matches LibLink adapter expectations");
     }
 }
