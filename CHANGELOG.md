@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.8] - 2026-02-25
+
+### <!-- 0 -->⛰️  Features
+
+- Implement keepalive probing for dead client detection
+- Gracefully terminate shell sessions
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve session termination and error handling
+
 ## [0.0.7] - 2026-02-24
 
 ### <!-- 3 -->📚 Documentation
