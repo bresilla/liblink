@@ -3,8 +3,8 @@
     .version = "0.0.8",
     .dependencies = .{
         .libfast = .{
-            .url = "https://github.com/bresilla/libfast/archive/refs/tags/0.0.8.tar.gz",
-            .hash = "libfast-0.0.8-Gf9gLk-RBwAtpBss2S1wTCxpT7xRLCwDoRCJs0kwi5Ys",
+            .url = "https://github.com/bresilla/libfast/archive/refs/tags/0.0.10.tar.gz",
+            .hash = "libfast-0.0.10-Gf9gLiWjBwCMlVXXCfi4NbnIyIpK83gYofzbVxPo1PnK",
         },
     },
     .paths = .{
