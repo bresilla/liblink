@@ -179,6 +179,11 @@ pub const SessionRuntime = struct {
                 if (want_reply) server_conn.channel_manager.sendFailure(stream_id) catch {};
                 return err;
             };
+        } else if (std.mem.eql(u8, req.request_type, "window-change")) {
+            self.handleWindowChange(stream_id, req.type_specific_data) catch |err| {
+                if (want_reply) server_conn.channel_manager.sendFailure(stream_id) catch {};
+                return err;
+            };
         } else if (std.mem.eql(u8, req.request_type, "exec")) {
             var reader = wire.Reader{ .buffer = req.type_specific_data };
             const command = reader.readString(self.allocator) catch |err| {
@@ -285,6 +290,25 @@ pub const SessionRuntime = struct {
             .allocator = self.allocator,
         });
         try self.session_modes.put(stream_id, .shell);
+    }
+
+    fn handleWindowChange(self: *Self, stream_id: u64, type_specific_data: []const u8) !void {
+        var reader = wire.Reader{ .buffer = type_specific_data };
+        const width_chars = try reader.readUint32();
+        const height_rows = try reader.readUint32();
+        const width_pixels = try reader.readUint32();
+        const height_pixels = try reader.readUint32();
+
+        if (self.active_shells.getPtr(stream_id)) |session| {
+            try session.pty.setWindowSize(@intCast(height_rows), @intCast(width_chars));
+        }
+
+        if (self.pty_requests.getPtr(stream_id)) |info| {
+            info.width_chars = width_chars;
+            info.height_rows = height_rows;
+            info.width_pixels = width_pixels;
+            info.height_pixels = height_pixels;
+        }
     }
 
     fn handleExecRequest(self: *Self, stream_id: u64, command: []const u8) !void {
@@ -394,12 +418,81 @@ pub const SessionRuntime = struct {
         return true;
     }
 
+    fn nextClientChannelMessageLen(buffer: []const u8) !?usize {
+        if (buffer.len < 1) return null;
+
+        return switch (buffer[0]) {
+            94 => blk: {
+                if (buffer.len < 5) break :blk null;
+                const payload_len = (@as(u32, buffer[1]) << 24) |
+                    (@as(u32, buffer[2]) << 16) |
+                    (@as(u32, buffer[3]) << 8) |
+                    @as(u32, buffer[4]);
+                const total = 5 + @as(usize, @intCast(payload_len));
+                if (buffer.len < total) break :blk null;
+                break :blk total;
+            },
+            98 => blk: {
+                const req_type_end = parseWireStringEnd(buffer, 1) orelse break :blk null;
+                if (buffer.len < req_type_end + 1) break :blk null;
+
+                const req_type = buffer[5..req_type_end];
+                var idx = req_type_end + 1;
+
+                if (std.mem.eql(u8, req_type, "window-change")) {
+                    if (buffer.len < idx + 16) break :blk null;
+                    break :blk idx + 16;
+                }
+
+                if (std.mem.eql(u8, req_type, "shell")) {
+                    break :blk idx;
+                }
+
+                if (std.mem.eql(u8, req_type, "exec") or std.mem.eql(u8, req_type, "subsystem") or std.mem.eql(u8, req_type, "signal")) {
+                    const field_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    break :blk field_end;
+                }
+
+                if (std.mem.eql(u8, req_type, "env")) {
+                    const name_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    const value_end = parseWireStringEnd(buffer, name_end) orelse break :blk null;
+                    break :blk value_end;
+                }
+
+                if (std.mem.eql(u8, req_type, "pty-req")) {
+                    const term_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    if (buffer.len < term_end + 16) break :blk null;
+                    idx = term_end + 16;
+                    const modes_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    break :blk modes_end;
+                }
+
+                break :blk null;
+            },
+            96, 97 => 1,
+            else => 1,
+        };
+    }
+
+    fn parseWireStringEnd(buffer: []const u8, start: usize) ?usize {
+        if (buffer.len < start + 4) return null;
+        const field_len = (@as(u32, buffer[start]) << 24) |
+            (@as(u32, buffer[start + 1]) << 16) |
+            (@as(u32, buffer[start + 2]) << 8) |
+            @as(u32, buffer[start + 3]);
+        const end = start + 4 + @as(usize, @intCast(field_len));
+        if (buffer.len < end) return null;
+        return end;
+    }
+
     fn bridgeSession(self: *Self, server_conn: *connection.ServerConnection, stream_id: u64) !void {
         const session = self.active_shells.get(stream_id) orelse return error.NoPtyForSession;
         const p = session.pty;
 
         var pty_buffer: [16384]u8 = undefined;
         var channel_buffer: [16384]u8 = undefined;
+        var pending_client = std.ArrayListUnmanaged(u8){};
+        defer pending_client.deinit(self.allocator);
 
         const flags = try std.posix.fcntl(p.master_fd, std.posix.F.GETFL, 0);
         _ = try std.posix.fcntl(p.master_fd, std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
@@ -430,34 +523,56 @@ pub const SessionRuntime = struct {
                 // Other errors (e.g. WouldBlock already handled inside poll): ignore
             };
 
-            // Read from the QUIC stream. Don't swallow errors — StreamClosed
-            // and StreamNotFound are real signals that the client is gone.
-            const channel_len = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch |err| blk: {
-                if (err == error.StreamClosed or err == error.StreamNotFound) {
+            const channel_len: usize = server_conn.transport.receiveFromStream(stream_id, &channel_buffer) catch |err| blk: {
+                if (err == error.NoData or err == error.EndOfBuffer or err == error.StreamNotFound) break :blk @as(usize, 0);
+                if (err == error.StreamClosed) {
                     exit_reason = "client stream closed";
                     break :bridge;
                 }
                 break :blk @as(usize, 0);
             };
+
             if (channel_len > 0) {
                 last_client_activity = std.time.milliTimestamp();
-                const data = channel_buffer[0..channel_len];
+                try pending_client.appendSlice(self.allocator, channel_buffer[0..channel_len]);
 
-                if (data.len > 0 and data[0] == 94) {
-                    var channel_data = channel_protocol.ChannelData.decode(self.allocator, data) catch continue;
-                    defer channel_data.deinit(self.allocator);
-                    _ = p.write(channel_data.data) catch {
-                        exit_reason = "pty write failed";
-                        break;
-                    };
-                } else if (data.len > 0 and data[0] == 96) {
-                    // SSH_MSG_CHANNEL_EOF
-                    exit_reason = "client sent EOF";
-                    break;
-                } else if (data.len > 0 and data[0] == 97) {
-                    // SSH_MSG_CHANNEL_CLOSE
-                    exit_reason = "client sent channel close";
-                    break;
+                while (try nextClientChannelMessageLen(pending_client.items)) |msg_len| {
+                    const msg = pending_client.items[0..msg_len];
+                    const msg_type = msg[0];
+
+                    const remaining = pending_client.items.len - msg_len;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(u8, pending_client.items[0..remaining], pending_client.items[msg_len..]);
+                    }
+                    pending_client.items.len = remaining;
+
+                    switch (msg_type) {
+                        94 => {
+                            var channel_data = channel_protocol.ChannelData.decode(self.allocator, msg) catch continue;
+                            defer channel_data.deinit(self.allocator);
+                            _ = p.write(channel_data.data) catch {
+                                exit_reason = "pty write failed";
+                                break :bridge;
+                            };
+                        },
+                        98 => {
+                            var req = channel_protocol.ChannelRequest.decode(self.allocator, msg) catch continue;
+                            defer req.deinit(self.allocator);
+
+                            if (std.mem.eql(u8, req.request_type, "window-change")) {
+                                self.handleWindowChange(stream_id, req.type_specific_data) catch {};
+                            }
+                        },
+                        96 => {
+                            exit_reason = "client sent EOF";
+                            break :bridge;
+                        },
+                        97 => {
+                            exit_reason = "client sent channel close";
+                            break :bridge;
+                        },
+                        else => {},
+                    }
                 }
             }
 

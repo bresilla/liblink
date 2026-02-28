@@ -118,6 +118,27 @@ pub const SessionChannel = struct {
         try self.waitForRequestResponse();
     }
 
+    /// Notify server that local terminal window size changed.
+    ///
+    /// Per RFC 4254 Section 6.7 "window-change" request.
+    pub fn requestWindowChange(
+        self: *Self,
+        width_chars: u32,
+        height_rows: u32,
+        width_pixels: u32,
+        height_pixels: u32,
+    ) !void {
+        var payload: [16]u8 = undefined;
+        var writer = wire.Writer{ .buffer = &payload };
+        try writer.writeUint32(width_chars);
+        try writer.writeUint32(height_rows);
+        try writer.writeUint32(width_pixels);
+        try writer.writeUint32(height_pixels);
+
+        // SSH window-change usually does not request reply.
+        try self.manager.sendRequest(self.stream_id, "window-change", false, &payload);
+    }
+
     /// Request command execution
     ///
     /// Executes a single command on the remote server.

@@ -11,6 +11,7 @@ pub const ChannelManager = struct {
     allocator: Allocator,
     transport: *quic_transport.QuicTransport,
     channels: std.AutoHashMap(u64, *ChannelInfo),
+    recv_pending: std.AutoHashMap(u64, std.ArrayListUnmanaged(u8)),
     next_client_stream_id: u64, // For client-initiated streams (4, 8, 12, ...)
 
     const Self = @This();
@@ -32,6 +33,7 @@ pub const ChannelManager = struct {
             .allocator = allocator,
             .transport = transport,
             .channels = std.AutoHashMap(u64, *ChannelInfo).init(allocator),
+            .recv_pending = std.AutoHashMap(u64, std.ArrayListUnmanaged(u8)).init(allocator),
             .next_client_stream_id = if (is_server) 5 else 4, // Server uses 5, 9, 13..., client uses 4, 8, 12...
         };
     }
@@ -43,6 +45,12 @@ pub const ChannelManager = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.channels.deinit();
+
+        var pending_iter = self.recv_pending.valueIterator();
+        while (pending_iter.next()) |pending| {
+            pending.*.deinit(self.allocator);
+        }
+        self.recv_pending.deinit();
     }
 
     /// Open a new channel (client-side)
@@ -250,61 +258,47 @@ pub const ChannelManager = struct {
     /// Reads and decodes CHANNEL_DATA message from stream.
     /// Returns the payload data. Caller owns the memory.
     pub fn receiveData(self: *Self, stream_id: u64) ![]u8 {
-        // Use a large buffer to accumulate the complete message
-        var buffer: [65536]u8 = undefined;
-        var total_received: usize = 0;
+        const pending = try self.getPendingBuffer(stream_id);
+        var read_buffer: [8192]u8 = undefined;
+        var reads: u8 = 0;
 
-        // First, we need at least 5 bytes for the message header (type + length)
-        while (total_received < 5) {
-            const len = try self.transport.receiveFromStream(stream_id, buffer[total_received..]);
-            if (len == 0) {
-                if (total_received == 0) return error.NoData;
-                // Poll for more data
-                self.transport.poll(100) catch {};
-                continue;
+        while (reads < 8) : (reads += 1) {
+            const len = self.transport.receiveFromStream(stream_id, &read_buffer) catch |err| {
+                if (err == error.NoData) break;
+                if (err == error.StreamClosed or err == error.StreamNotFound) return error.StreamClosed;
+                return err;
+            };
+            if (len == 0) break;
+            try pending.appendSlice(self.allocator, read_buffer[0..len]);
+        }
+
+        while (try nextChannelMessageLen(pending.items)) |msg_len| {
+            const msg = pending.items[0..msg_len];
+            const msg_type = msg[0];
+
+            const remaining = pending.items.len - msg_len;
+            if (remaining > 0) {
+                std.mem.copyForwards(u8, pending.items[0..remaining], pending.items[msg_len..]);
             }
-            total_received += len;
-        }
+            pending.items.len = remaining;
 
-        // Parse message type
-        if (buffer[0] != 94) { // SSH_MSG_CHANNEL_DATA
-            std.log.err("receiveData: unexpected message type {}, expected 94 (CHANNEL_DATA)", .{buffer[0]});
-            return error.InvalidMessageType;
-        }
-
-        // Parse data length (4 bytes, big-endian)
-        const data_len = std.mem.readInt(u32, buffer[1..5], .big);
-        if (data_len > buffer.len - 5) return error.MessageTooLarge;
-        const total_msg_len = 5 + data_len; // header (5 bytes) + data
-
-        // std.log.debug("receiveData: message claims {} bytes of data, total message = {} bytes", .{ data_len, total_msg_len });
-
-        // Read the rest of the message, polling for more data if needed
-        var poll_attempts: u32 = 0;
-        while (total_received < total_msg_len) {
-            const len = try self.transport.receiveFromStream(stream_id, buffer[total_received..]);
-            if (len == 0) {
-                // No more data in buffer, poll for more packets
-                poll_attempts += 1;
-                if (poll_attempts > 100) { // 10 seconds timeout
-                    std.log.err("receiveData: timeout waiting for complete message, got {} bytes, expected {}", .{ total_received, total_msg_len });
-                    return error.IncompleteMessage;
-                }
-                self.transport.poll(100) catch {}; // 100ms poll
-                continue;
+            switch (msg_type) {
+                94 => {
+                    const data_msg = try channel_protocol.ChannelData.decode(self.allocator, msg);
+                    return @constCast(data_msg.data);
+                },
+                95 => {
+                    const ext_msg = try channel_protocol.ChannelExtendedData.decode(self.allocator, msg);
+                    return @constCast(ext_msg.data);
+                },
+                96, 97 => return error.StreamClosed,
+                99, 100 => continue,
+                else => continue,
             }
-            total_received += len;
-            poll_attempts = 0; // Reset timeout counter when we get data
-            // std.log.debug("receiveData: read {} more bytes, total now {}/{}", .{ len, total_received, total_msg_len });
         }
 
-        // std.log.debug("receiveData: complete message received, {} bytes total", .{total_received});
-
-        // Now decode the complete message
-        const data_msg = try channel_protocol.ChannelData.decode(self.allocator, buffer[0..total_received]);
-        // Don't defer deinit - caller owns the data
-
-        return @constCast(data_msg.data);
+        if (pending.items.len > 0) return error.EndOfBuffer;
+        return error.NoData;
     }
 
     /// Send EOF on channel
@@ -327,6 +321,11 @@ pub const ChannelManager = struct {
 
         if (self.channels.getPtr(stream_id)) |info| {
             info.*.state = .closed;
+        }
+
+        if (self.recv_pending.fetchRemove(stream_id)) |entry| {
+            var pending = entry.value;
+            pending.deinit(self.allocator);
         }
 
         std.log.info("Closed channel {}", .{stream_id});
@@ -383,6 +382,91 @@ pub const ChannelManager = struct {
         errdefer info.deinit();
 
         try self.channels.put(stream_id, info);
+    }
+
+    fn getPendingBuffer(self: *Self, stream_id: u64) !*std.ArrayListUnmanaged(u8) {
+        if (!self.recv_pending.contains(stream_id)) {
+            try self.recv_pending.put(stream_id, .{});
+        }
+        return self.recv_pending.getPtr(stream_id).?;
+    }
+
+    fn nextChannelMessageLen(buffer: []const u8) !?usize {
+        if (buffer.len < 1) return null;
+
+        return switch (buffer[0]) {
+            94 => blk: {
+                if (buffer.len < 5) break :blk null;
+                const payload_len = std.mem.readInt(u32, buffer[1..5], .big);
+                const total = 5 + @as(usize, @intCast(payload_len));
+                if (buffer.len < total) break :blk null;
+                break :blk total;
+            },
+            95 => blk: {
+                if (buffer.len < 9) break :blk null;
+                const payload_len = std.mem.readInt(u32, buffer[5..9], .big);
+                const total = 9 + @as(usize, @intCast(payload_len));
+                if (buffer.len < total) break :blk null;
+                break :blk total;
+            },
+            98 => blk: {
+                // CHANNEL_REQUEST:
+                // byte msg_type
+                // string request_type
+                // boolean want_reply
+                // type_specific_data (format depends on request_type)
+                const req_type_end = parseWireStringEnd(buffer, 1) orelse break :blk null;
+                if (buffer.len < req_type_end + 1) break :blk null;
+
+                const req_type = buffer[5..req_type_end];
+                var idx = req_type_end + 1;
+
+                if (std.mem.eql(u8, req_type, "window-change")) {
+                    if (buffer.len < idx + 16) break :blk null;
+                    break :blk idx + 16;
+                }
+
+                if (std.mem.eql(u8, req_type, "shell")) {
+                    break :blk idx;
+                }
+
+                if (std.mem.eql(u8, req_type, "exec") or std.mem.eql(u8, req_type, "subsystem") or std.mem.eql(u8, req_type, "signal")) {
+                    const field_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    break :blk field_end;
+                }
+
+                if (std.mem.eql(u8, req_type, "env")) {
+                    const name_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    const value_end = parseWireStringEnd(buffer, name_end) orelse break :blk null;
+                    break :blk value_end;
+                }
+
+                if (std.mem.eql(u8, req_type, "pty-req")) {
+                    const term_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    if (buffer.len < term_end + 16) break :blk null;
+                    idx = term_end + 16;
+                    const modes_end = parseWireStringEnd(buffer, idx) orelse break :blk null;
+                    break :blk modes_end;
+                }
+
+                // Unknown request type: don't desync stream parsing.
+                // Wait for more data and let higher-level code handle it via specific paths.
+                break :blk null;
+            },
+            96, 97, 99, 100 => 1,
+            else => 1,
+        };
+    }
+
+    fn parseWireStringEnd(buffer: []const u8, start: usize) ?usize {
+        if (buffer.len < start + 4) return null;
+        const field_len = (@as(u32, buffer[start]) << 24) |
+            (@as(u32, buffer[start + 1]) << 16) |
+            (@as(u32, buffer[start + 2]) << 8) |
+            @as(u32, buffer[start + 3]);
+        const end = start + 4 + @as(usize, @intCast(field_len));
+        if (buffer.len < end) return null;
+        return end;
     }
 };
 
