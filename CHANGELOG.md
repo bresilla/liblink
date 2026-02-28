@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.9] - 2026-02-28
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve client I/O and window resizing
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Update libfast dependency
+
 ## [0.0.8] - 2026-02-25
 
 ### <!-- 0 -->⛰️  Features

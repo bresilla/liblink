@@ -16,11 +16,17 @@ const VERSION = "0.0.4";
 
 // Global flag for signal handling
 var should_exit = std.atomic.Value(bool).init(false);
+var should_resize = std.atomic.Value(bool).init(false);
 
 /// Signal handler for Ctrl+C
 fn handleSigInt(sig: c_int) callconv(.c) void {
     _ = sig;
     should_exit.store(true, .release);
+}
+
+fn handleSigWinch(sig: c_int) callconv(.c) void {
+    _ = sig;
+    should_resize.store(true, .release);
 }
 
 pub fn main() !void {
@@ -671,12 +677,20 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
     };
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 
+    var winch_act = std.posix.Sigaction{
+        .handler = .{ .handler = handleSigWinch },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.WINCH, &winch_act, null);
+
     runShellInteractive(allocator, &session) catch |err| {
         std.debug.print("\r\nSession error: {}\r\n", .{err});
     };
 
     // Reset exit flag for future connections
     should_exit.store(false, .release);
+    should_resize.store(false, .release);
 
     // Force terminal restore before any cleanup
     if (entered_raw_mode) {
@@ -685,12 +699,18 @@ fn runShellCommand(allocator: std.mem.Allocator, args: []const []const u8) !void
 }
 
 fn runShellInteractive(allocator: std.mem.Allocator, session: *liblink.channels.SessionChannel) !void {
-    _ = allocator;
     const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
     const stdout = std.fs.File{ .handle = std.posix.STDOUT_FILENO };
 
     var running = true;
     var stdin_buffer: [16384]u8 = undefined;
+    var out_batch = std.ArrayListUnmanaged(u8){};
+    defer out_batch.deinit(allocator);
+    var pending_resize: ?struct { rows: u32, cols: u32 } = null;
+    var last_resize_event_ms: i64 = 0;
+    var last_resize_sent_ms: i64 = 0;
+    const resize_debounce_ms: i64 = 80;
+    const resize_max_rate_ms: i64 = 120;
 
     // Optimized I/O loop for low latency
     while (running) {
@@ -699,8 +719,25 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *liblink.channels.
             break;
         }
 
-        // Poll with minimal timeout (1ms)
+        // Poll with minimal timeout to keep latency low.
         session.manager.transport.poll(1) catch {};
+
+        if (should_resize.swap(false, .acq_rel)) {
+            const term_size = getTerminalSize() catch .{ .rows = 24, .cols = 80 };
+            pending_resize = .{ .rows = term_size.rows, .cols = term_size.cols };
+            last_resize_event_ms = std.time.milliTimestamp();
+        }
+
+        if (pending_resize) |size| {
+            const now = std.time.milliTimestamp();
+            if ((now - last_resize_event_ms) >= resize_debounce_ms or
+                (now - last_resize_sent_ms) >= resize_max_rate_ms)
+            {
+                session.requestWindowChange(size.cols, size.rows, 0, 0) catch {};
+                pending_resize = null;
+                last_resize_sent_ms = now;
+            }
+        }
 
         // Check for stdin input (non-blocking)
         const stdin_len: usize = stdin.read(&stdin_buffer) catch |err| blk: {
@@ -721,24 +758,32 @@ fn runShellInteractive(allocator: std.mem.Allocator, session: *liblink.channels.
             };
         }
 
-        // Check for server output (non-blocking)
-        if (session.receiveData()) |data| {
-            defer session.manager.allocator.free(data);
-            stdout.writeAll(data) catch {};
-        } else |err| {
-            // Handle errors
-            if (err == error.StreamClosed) {
-                // Stream closed by server - clean exit
-                running = false;
-            } else if (err == error.InvalidMessageType) {
-                // Got EOF or other non-data message
-                std.debug.print("\r\n[CLIENT] Received EOF from server, exiting\r\n", .{});
-                running = false;
-            } else if (err != error.NoData and err != error.EndOfBuffer) {
-                // Real error - exit
+        // Drain multiple server frames per loop and batch writes.
+        out_batch.clearRetainingCapacity();
+        var drained: u16 = 0;
+        while (drained < 128) : (drained += 1) {
+            if (session.receiveData()) |data| {
+                defer session.manager.allocator.free(data);
+                try out_batch.appendSlice(allocator, data);
+            } else |err| {
+                if (err == error.NoData or err == error.EndOfBuffer or err == error.InvalidMessageType or err == error.IncompleteMessage or err == error.MessageTooLarge) {
+                    break;
+                }
+                if (err == error.StreamClosed) {
+                    running = false;
+                    break;
+                }
                 std.debug.print("\r\n[CLIENT] Connection error: {}, exiting\r\n", .{err});
                 running = false;
+                break;
             }
+        }
+
+        if (out_batch.items.len > 0) {
+            stdout.writeAll(out_batch.items) catch {};
+        } else {
+            // Idle backoff to avoid hot spinning when there is no traffic.
+            std.Thread.sleep(500 * std.time.ns_per_us);
         }
     }
 
@@ -1132,4 +1177,3 @@ fn encodeHostKeyBlob(allocator: std.mem.Allocator, public_key: *const [32]u8) ![
 
     return blob;
 }
-
